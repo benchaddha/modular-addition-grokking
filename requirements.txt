@@ -1,0 +1,10 @@
+torch
+numpy
+transformer_lens
+wandb
+circuitsvis
+plotly
+pyyaml
+tqdm
+einops
+jupyter
