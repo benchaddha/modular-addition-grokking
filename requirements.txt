@@ -1,10 +1,11 @@
 torch
-numpy
-transformer_lens
-wandb
 circuitsvis
-plotly
-pyyaml
-tqdm
 einops
 jupyter
+numpy
+plotly
+pyyaml
+torch
+tqdm
+transformer_lens
+wandb
