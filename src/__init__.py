@@ -6,6 +6,7 @@ from .config import (
     OptimizerConfig,
     TrainingConfig,
 )
+from .metrics import accuracy_from_logits, evaluate_accuracy, find_grok_epoch
 from .model import get_model
 
 __all__ = [
@@ -15,5 +16,8 @@ __all__ = [
     "OptimizerConfig",
     "TrainingConfig",
     "LoggingConfig",
+    "accuracy_from_logits",
+    "evaluate_accuracy",
+    "find_grok_epoch",
     "get_model",
 ]
