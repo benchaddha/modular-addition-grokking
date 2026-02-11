@@ -1,5 +1,8 @@
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+import yaml
 
 
 @dataclass
@@ -56,6 +59,23 @@ class Config:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]] = None) -> "Config":
+        cfg = cls()
+        if data:
+            _update_dataclass(cfg, data)
+        cfg.validate()
+        return cfg
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "Config":
+        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise ValueError("YAML config must deserialize to a mapping.")
+        return cls.from_dict(payload)
+
     def validate(self) -> None:
         if not 0.0 < self.data.frac_train < 1.0:
             raise ValueError("data.frac_train must be in the open interval (0, 1).")
@@ -63,3 +83,14 @@ class Config:
             raise ValueError("model.d_model must equal model.n_heads * model.d_head.")
         if self.train.batch_size <= 0:
             raise ValueError("train.batch_size must be > 0.")
+
+
+def _update_dataclass(instance: Any, updates: Dict[str, Any]) -> None:
+    for key, value in updates.items():
+        if not hasattr(instance, key):
+            raise KeyError(f"Unknown config key: {key}")
+        current = getattr(instance, key)
+        if is_dataclass(current) and isinstance(value, dict):
+            _update_dataclass(current, value)
+        else:
+            setattr(instance, key, value)

@@ -1,0 +1,27 @@
+model:
+  p: 113
+  d_model: 128
+  n_layers: 1
+  n_heads: 4
+  d_head: 32
+  d_mlp: 512
+  n_ctx: 3
+  act_fn: relu
+  normalization_type: null
+
+data:
+  frac_train: 0.3
+
+optim:
+  lr: 0.001
+  weight_decay: 1.0
+
+train:
+  seed: 42
+  batch_size: 64
+  epochs: 10000
+  eval_every: 100
+
+logging:
+  wandb_project: grokking-demo
+  run_name: null
