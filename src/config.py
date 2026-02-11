@@ -1,6 +1,6 @@
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -49,12 +49,25 @@ class LoggingConfig:
 
 
 @dataclass
+class PhysicsConfig:
+    temperatures: List[float] = field(
+        default_factory=lambda: [0.0, 1e-6, 3e-6, 1e-5, 3e-5, 1e-4]
+    )
+    seeds: List[int] = field(default_factory=lambda: list(range(10)))
+    max_epochs: int = 20_000
+    eval_every: int = 100
+    grok_thresholds: List[float] = field(default_factory=lambda: [0.95, 0.99])
+    noise_seed_offset: int = 10_000
+
+
+@dataclass
 class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
     optim: OptimizerConfig = field(default_factory=OptimizerConfig)
     train: TrainingConfig = field(default_factory=TrainingConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    physics: PhysicsConfig = field(default_factory=PhysicsConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -83,6 +96,17 @@ class Config:
             raise ValueError("model.d_model must equal model.n_heads * model.d_head.")
         if self.train.batch_size <= 0:
             raise ValueError("train.batch_size must be > 0.")
+        if self.physics.max_epochs <= 0:
+            raise ValueError("physics.max_epochs must be > 0.")
+        if self.physics.eval_every <= 0:
+            raise ValueError("physics.eval_every must be > 0.")
+        if not self.physics.temperatures:
+            raise ValueError("physics.temperatures must be non-empty.")
+        if not self.physics.seeds:
+            raise ValueError("physics.seeds must be non-empty.")
+        for threshold in self.physics.grok_thresholds:
+            if not 0.0 < threshold <= 1.0:
+                raise ValueError("physics.grok_thresholds must be in the range (0, 1].")
 
 
 def _update_dataclass(instance: Any, updates: Dict[str, Any]) -> None:

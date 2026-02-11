@@ -1,4 +1,5 @@
 import inspect
+from typing import Optional
 
 import torch
 from transformer_lens import HookedTransformer, HookedTransformerConfig
@@ -10,8 +11,9 @@ def get_device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def get_model(cfg: Config) -> HookedTransformer:
+def get_model(cfg: Config, seed: Optional[int] = None) -> HookedTransformer:
     cfg.validate()
+    model_seed = cfg.train.seed if seed is None else seed
     desired_kwargs = {
         "n_layers": cfg.model.n_layers,
         "d_model": cfg.model.d_model,
@@ -23,7 +25,7 @@ def get_model(cfg: Config) -> HookedTransformer:
         "normalization_type": cfg.model.normalization_type,
         "d_vocab": cfg.model.vocab_size,
         "d_vocab_out": cfg.model.vocab_size,
-        "seed": cfg.train.seed,
+        "seed": model_seed,
         "device": get_device(),
     }
     valid_keys = set(inspect.signature(HookedTransformerConfig.__init__).parameters)
