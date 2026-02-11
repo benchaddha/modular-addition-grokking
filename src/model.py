@@ -8,7 +8,11 @@ from .config import Config
 
 
 def get_device() -> str:
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
 
 
 def get_model(cfg: Config, seed: Optional[int] = None) -> HookedTransformer:
