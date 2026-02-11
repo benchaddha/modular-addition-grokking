@@ -1,5 +1,7 @@
 import os
 import random
+import json
+from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
@@ -42,9 +44,17 @@ def train(cfg: Config) -> List[Dict[str, float]]:
         config=cfg.to_dict(),
         mode=os.getenv("WANDB_MODE", "offline"),
     )
+    run_id = run.id or f"seed-{cfg.train.seed}"
+
+    checkpoints_dir = Path("results") / "checkpoints"
+    metrics_dir = Path("results") / "metrics"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = metrics_dir / f"{run_id}.jsonl"
 
     history: List[Dict[str, float]] = []
     train_size = train_tokens.shape[0]
+    best_test_acc = float("-inf")
     pbar = tqdm(range(cfg.train.epochs), desc="training")
 
     try:
@@ -77,10 +87,35 @@ def train(cfg: Config) -> List[Dict[str, float]]:
                 }
                 history.append(row)
                 wandb.log(row, step=epoch)
+                with metrics_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(row) + "\n")
+
+                if test_acc > best_test_acc:
+                    best_test_acc = test_acc
+                    torch.save(
+                        {
+                            "epoch": epoch,
+                            "cfg": cfg.to_dict(),
+                            "model_state_dict": model.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "metrics": row,
+                        },
+                        checkpoints_dir / f"{run_id}_best.pt",
+                    )
                 pbar.set_description(
                     f"epoch={epoch} train={train_acc:.3f} test={test_acc:.3f}"
                 )
     finally:
+        torch.save(
+            {
+                "epoch": cfg.train.epochs - 1,
+                "cfg": cfg.to_dict(),
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "metrics": history[-1] if history else None,
+            },
+            checkpoints_dir / f"{run_id}_final.pt",
+        )
         run.finish()
 
     return history
