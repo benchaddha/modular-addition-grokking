@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from .config import Config
 from .dataset import get_dataset
+from .fft_logging import append_fft_log
 from .metrics import evaluate_accuracy
 from .model import get_model
 
@@ -51,6 +52,7 @@ def train(cfg: Config) -> List[Dict[str, float]]:
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = metrics_dir / f"{run_id}.jsonl"
+    fft_metrics_path = metrics_dir / f"{run_id}_fft.jsonl"
 
     history: List[Dict[str, float]] = []
     train_size = train_tokens.shape[0]
@@ -85,6 +87,13 @@ def train(cfg: Config) -> List[Dict[str, float]]:
                     "train_acc": float(train_acc),
                     "test_acc": float(test_acc),
                 }
+                fft_summary = append_fft_log(
+                    model=model,
+                    tensor_path="blocks.0.attn.W_Q",
+                    epoch=epoch,
+                    output_path=fft_metrics_path,
+                )
+                row.update(fft_summary)
                 history.append(row)
                 wandb.log(row, step=epoch)
                 with metrics_path.open("a", encoding="utf-8") as handle:
