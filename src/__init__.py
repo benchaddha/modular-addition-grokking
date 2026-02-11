@@ -6,6 +6,7 @@ from .config import (
     OptimizerConfig,
     TrainingConfig,
 )
+from .model import get_model
 
 __all__ = [
     "Config",
@@ -14,4 +15,5 @@ __all__ = [
     "OptimizerConfig",
     "TrainingConfig",
     "LoggingConfig",
+    "get_model",
 ]
