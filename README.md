@@ -25,3 +25,15 @@ pip install -r requirements.txt
 
 3. Run experiments from the project root as modules/scripts (to be added in
 later commits).
+
+Smoke run:
+
+```bash
+WANDB_MODE=offline python3 scripts/run_baseline.py --config configs/smoke.yaml
+```
+
+Baseline run:
+
+```bash
+WANDB_MODE=offline python3 scripts/run_baseline.py --config configs/default.yaml
+```
