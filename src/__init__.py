@@ -5,6 +5,7 @@ from .config import (
     ModelConfig,
     OptimizerConfig,
     PhysicsConfig,
+    SurgeryConfig,
     TrainingConfig,
 )
 from .dataset import build_batch_schedule
@@ -23,6 +24,7 @@ __all__ = [
     "TrainingConfig",
     "LoggingConfig",
     "PhysicsConfig",
+    "SurgeryConfig",
     "build_batch_schedule",
     "run_paired_physics_sweep",
     "append_fft_log",

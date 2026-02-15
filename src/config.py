@@ -61,6 +61,23 @@ class PhysicsConfig:
 
 
 @dataclass
+class SurgeryConfig:
+    checkpoint_paths: List[str] = field(
+        default_factory=lambda: ["results/checkpoints/replace_with_checkpoint.pt"]
+    )
+    probe_split: str = "test"
+    probe_max_examples: int = 0
+    top_k: List[int] = field(default_factory=lambda: [1, 2, 3, 4])
+    random_control_repeats: int = 3
+    eval_batch_size: int = 2048
+    min_baseline_train_acc: float = 0.95
+    min_baseline_test_acc: float = 0.95
+    causal_train_floor: float = 0.90
+    causal_test_chance_multiplier: float = 2.0
+    seed: int = 123
+
+
+@dataclass
 class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
@@ -68,6 +85,7 @@ class Config:
     train: TrainingConfig = field(default_factory=TrainingConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     physics: PhysicsConfig = field(default_factory=PhysicsConfig)
+    surgery: SurgeryConfig = field(default_factory=SurgeryConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -107,6 +125,30 @@ class Config:
         for threshold in self.physics.grok_thresholds:
             if not 0.0 < threshold <= 1.0:
                 raise ValueError("physics.grok_thresholds must be in the range (0, 1].")
+        self.validate_surgery()
+
+    def validate_surgery(self) -> None:
+        if not self.surgery.checkpoint_paths:
+            raise ValueError("surgery.checkpoint_paths must be non-empty.")
+        if self.surgery.probe_split not in {"train", "test"}:
+            raise ValueError("surgery.probe_split must be either 'train' or 'test'.")
+        if self.surgery.probe_max_examples < 0:
+            raise ValueError("surgery.probe_max_examples must be >= 0.")
+        if self.surgery.eval_batch_size <= 0:
+            raise ValueError("surgery.eval_batch_size must be > 0.")
+        if self.surgery.random_control_repeats < 0:
+            raise ValueError("surgery.random_control_repeats must be >= 0.")
+        if not 0.0 < self.surgery.causal_train_floor <= 1.0:
+            raise ValueError("surgery.causal_train_floor must be in the range (0, 1].")
+        if self.surgery.causal_test_chance_multiplier <= 0.0:
+            raise ValueError("surgery.causal_test_chance_multiplier must be > 0.")
+        if not self.surgery.top_k:
+            raise ValueError("surgery.top_k must be non-empty.")
+        if any(k <= 0 for k in self.surgery.top_k):
+            raise ValueError("surgery.top_k values must be > 0.")
+        unique_sorted = sorted(set(self.surgery.top_k))
+        if unique_sorted != self.surgery.top_k:
+            raise ValueError("surgery.top_k must be unique and sorted ascending.")
 
 
 def _update_dataclass(instance: Any, updates: Dict[str, Any]) -> None:

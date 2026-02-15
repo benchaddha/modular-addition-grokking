@@ -1,0 +1,41 @@
+model:
+  p: 113
+  d_model: 128
+  n_layers: 1
+  n_heads: 4
+  d_head: 32
+  d_mlp: 512
+  n_ctx: 3
+  act_fn: relu
+  normalization_type: null
+
+data:
+  frac_train: 0.3
+
+optim:
+  lr: 0.001
+  weight_decay: 1.0
+
+train:
+  seed: 42
+  batch_size: 64
+  epochs: 10000
+  eval_every: 100
+
+logging:
+  wandb_project: grokking-demo
+  run_name: surgery
+
+surgery:
+  checkpoint_paths:
+    - results/checkpoints/replace_with_checkpoint.pt
+  probe_split: test
+  probe_max_examples: 0
+  top_k: [1, 2, 3, 4]
+  random_control_repeats: 3
+  eval_batch_size: 2048
+  min_baseline_train_acc: 0.95
+  min_baseline_test_acc: 0.95
+  causal_train_floor: 0.90
+  causal_test_chance_multiplier: 2.0
+  seed: 123
