@@ -11,6 +11,7 @@ from tqdm import tqdm
 from .config import Config
 from .dataset import build_batch_schedule, get_dataset
 from .model import get_model
+from .surgery import run_surgery_ablation_sweep
 from .train_physics import clone_state_dict, train_physics_run
 
 
@@ -265,4 +266,264 @@ def run_paired_physics_sweep(cfg: Config) -> Dict[str, Any]:
         "summary_path": str(summary_path),
         "figure_paths": [str(path) for path in figure_paths],
         "num_runs": len(raw_rows),
+    }
+
+
+def _mean_or_none(values: Sequence[float]) -> Any:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _build_hypothesis_b_summary_rows(
+    cfg: Config,
+    ablation_rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    rows_by_checkpoint: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in ablation_rows:
+        rows_by_checkpoint[row["checkpoint_path"]].append(row)
+
+    chance_threshold = cfg.surgery.causal_test_chance_multiplier / cfg.model.p
+    max_top_k = max(cfg.surgery.top_k)
+    summary_rows: List[Dict[str, Any]] = []
+
+    for checkpoint_path, checkpoint_rows in sorted(rows_by_checkpoint.items()):
+        baseline_rows = [r for r in checkpoint_rows if r["condition"] == "baseline"]
+        if len(baseline_rows) != 1:
+            raise ValueError(f"Expected 1 baseline row for {checkpoint_path}.")
+        baseline = baseline_rows[0]
+
+        gate_pass = (
+            baseline["train_acc"] >= cfg.surgery.min_baseline_train_acc
+            and baseline["test_acc"] >= cfg.surgery.min_baseline_test_acc
+        )
+
+        top_k_rows = [r for r in checkpoint_rows if r["condition"] == "top_k"]
+        top_k_rows.sort(key=lambda row: int(row["k"]))
+        max_top_k_rows = [r for r in top_k_rows if int(r["k"]) == max_top_k]
+        if len(max_top_k_rows) != 1:
+            raise ValueError(
+                f"Expected one top_k row with k={max_top_k} for {checkpoint_path}."
+            )
+        max_top_k_row = max_top_k_rows[0]
+
+        random_max_rows = [
+            r
+            for r in checkpoint_rows
+            if r["condition"] == "random_k" and int(r["k"]) == max_top_k
+        ]
+        all_heads_rows = [r for r in checkpoint_rows if r["condition"] == "all_heads"]
+        all_heads_row = all_heads_rows[0] if all_heads_rows else None
+
+        causal_pass = (
+            gate_pass
+            and max_top_k_row["test_acc"] <= chance_threshold
+            and max_top_k_row["train_acc"] >= cfg.surgery.causal_train_floor
+        )
+
+        summary_rows.append(
+            {
+                "checkpoint_path": checkpoint_path,
+                "gate_pass": gate_pass,
+                "causal_pass": causal_pass,
+                "chance_test_threshold": chance_threshold,
+                "baseline_train_acc": baseline["train_acc"],
+                "baseline_test_acc": baseline["test_acc"],
+                "max_top_k": max_top_k,
+                "topk_train_acc": max_top_k_row["train_acc"],
+                "topk_test_acc": max_top_k_row["test_acc"],
+                "random_topk_train_acc_mean": _mean_or_none(
+                    [row["train_acc"] for row in random_max_rows]
+                ),
+                "random_topk_test_acc_mean": _mean_or_none(
+                    [row["test_acc"] for row in random_max_rows]
+                ),
+                "all_heads_train_acc": (
+                    all_heads_row["train_acc"] if all_heads_row is not None else None
+                ),
+                "all_heads_test_acc": (
+                    all_heads_row["test_acc"] if all_heads_row is not None else None
+                ),
+            }
+        )
+
+    return summary_rows
+
+
+def _write_hypothesis_b_figure(
+    ablation_rows: Sequence[Dict[str, Any]],
+    output_path: Path,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    topk_rows = [row for row in ablation_rows if row["condition"] == "top_k"]
+    random_rows = [row for row in ablation_rows if row["condition"] == "random_k"]
+    baseline_rows = [row for row in ablation_rows if row["condition"] == "baseline"]
+
+    k_values = sorted({int(row["k"]) for row in topk_rows})
+    baseline_train = _mean_or_none([row["train_acc"] for row in baseline_rows])
+    baseline_test = _mean_or_none([row["test_acc"] for row in baseline_rows])
+
+    topk_train_y: List[float] = []
+    topk_test_y: List[float] = []
+    random_train_y: List[float] = []
+    random_test_y: List[float] = []
+    for k in k_values:
+        topk_k = [row for row in topk_rows if int(row["k"]) == k]
+        random_k = [row for row in random_rows if int(row["k"]) == k]
+        topk_train_y.append(_mean_or_none([row["train_acc"] for row in topk_k]) or 0.0)
+        topk_test_y.append(_mean_or_none([row["test_acc"] for row in topk_k]) or 0.0)
+        random_train_y.append(_mean_or_none([row["train_acc"] for row in random_k]) or 0.0)
+        random_test_y.append(_mean_or_none([row["test_acc"] for row in random_k]) or 0.0)
+
+    fig = go.Figure()
+    if baseline_train is not None and baseline_test is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[0],
+                y=[baseline_train],
+                mode="markers",
+                marker=dict(symbol="diamond", size=10),
+                name="Baseline Train",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[0],
+                y=[baseline_test],
+                mode="markers",
+                marker=dict(symbol="diamond", size=10),
+                name="Baseline Test",
+            )
+        )
+
+    fig.add_trace(
+        go.Scatter(
+            x=k_values,
+            y=topk_train_y,
+            mode="lines+markers",
+            name="Top-k Train",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=k_values,
+            y=topk_test_y,
+            mode="lines+markers",
+            name="Top-k Test",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=k_values,
+            y=random_train_y,
+            mode="lines+markers",
+            line=dict(dash="dash"),
+            name="Random-k Train (mean)",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=k_values,
+            y=random_test_y,
+            mode="lines+markers",
+            line=dict(dash="dash"),
+            name="Random-k Test (mean)",
+        )
+    )
+
+    fig.update_layout(
+        title="Hypothesis B: Accuracy Under Top-k vs Random-k Head Ablation",
+        xaxis_title="Number of Ablated Heads (k)",
+        yaxis_title="Accuracy",
+        template="plotly_white",
+    )
+    fig.write_html(output_path)
+    return output_path
+
+
+def _write_hypothesis_b_report(
+    cfg: Config,
+    summary_rows: Sequence[Dict[str, Any]],
+    output_path: Path,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    total = len(summary_rows)
+    gate_pass = sum(1 for row in summary_rows if row["gate_pass"])
+    causal_pass = sum(1 for row in summary_rows if row["causal_pass"])
+
+    lines = [
+        "# Hypothesis B Results (Draft)",
+        "",
+        "## Setup",
+        f"- Checkpoints evaluated: {total}",
+        f"- Baseline gate (train/test): {cfg.surgery.min_baseline_train_acc:.2f} / "
+        f"{cfg.surgery.min_baseline_test_acc:.2f}",
+        f"- Causal test chance threshold: "
+        f"{cfg.surgery.causal_test_chance_multiplier:.1f}/p = "
+        f"{cfg.surgery.causal_test_chance_multiplier / cfg.model.p:.4f}",
+        f"- Causal train floor: {cfg.surgery.causal_train_floor:.2f}",
+        "",
+        "## Headline",
+        f"- Gate pass: {gate_pass}/{total}",
+        f"- Causal pass (max top-k): {causal_pass}/{total}",
+        "",
+        "## Per-checkpoint summary",
+        "| checkpoint | gate_pass | causal_pass | baseline_train | baseline_test | "
+        "topk_train | topk_test | random_topk_test_mean |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in summary_rows:
+        lines.append(
+            f"| {Path(row['checkpoint_path']).name} | "
+            f"{int(bool(row['gate_pass']))} | "
+            f"{int(bool(row['causal_pass']))} | "
+            f"{row['baseline_train_acc']:.4f} | "
+            f"{row['baseline_test_acc']:.4f} | "
+            f"{row['topk_train_acc']:.4f} | "
+            f"{row['topk_test_acc']:.4f} | "
+            f"{(row['random_topk_test_acc_mean'] or 0.0):.4f} |"
+        )
+
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return output_path
+
+
+def run_hypothesis_b_surgery(cfg: Config) -> Dict[str, Any]:
+    cfg.validate()
+    cfg.validate_surgery()
+
+    metrics_dir = Path("results") / "metrics"
+    figures_dir = Path("results") / "figures"
+    reports_dir = Path("results") / "reports"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    ablation_path = metrics_dir / "surgery_ablations.jsonl"
+    ablation_rows = run_surgery_ablation_sweep(cfg=cfg, output_path=ablation_path)
+
+    summary_rows = _build_hypothesis_b_summary_rows(cfg=cfg, ablation_rows=ablation_rows)
+    summary_path = metrics_dir / "surgery_summary.csv"
+    _write_summary_csv(summary_path, summary_rows)
+
+    figure_path = _write_hypothesis_b_figure(
+        ablation_rows=ablation_rows,
+        output_path=figures_dir / "hypothesis_b_ablation_curve.html",
+    )
+    report_path = _write_hypothesis_b_report(
+        cfg=cfg,
+        summary_rows=summary_rows,
+        output_path=reports_dir / "hypothesis_b_results_draft.md",
+    )
+
+    return {
+        "ablations_path": str(ablation_path),
+        "summary_path": str(summary_path),
+        "figure_path": str(figure_path),
+        "report_path": str(report_path),
+        "num_ablation_rows": len(ablation_rows),
+        "num_checkpoints": len(summary_rows),
+        "num_gate_pass": sum(1 for row in summary_rows if row["gate_pass"]),
+        "num_causal_pass": sum(1 for row in summary_rows if row["causal_pass"]),
     }

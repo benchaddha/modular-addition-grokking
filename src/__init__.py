@@ -9,7 +9,7 @@ from .config import (
     TrainingConfig,
 )
 from .dataset import build_batch_schedule
-from .experiments import run_paired_physics_sweep
+from .experiments import run_hypothesis_b_surgery, run_paired_physics_sweep
 from .fft_logging import append_fft_log
 from .fourier_analysis import visualize_fourier_spectrum
 from .metrics import accuracy_from_logits, evaluate_accuracy, find_grok_epoch
@@ -32,6 +32,7 @@ __all__ = [
     "SurgeryConfig",
     "build_batch_schedule",
     "run_paired_physics_sweep",
+    "run_hypothesis_b_surgery",
     "append_fft_log",
     "visualize_fourier_spectrum",
     "accuracy_from_logits",
