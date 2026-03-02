@@ -1,6 +1,7 @@
 import json
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -147,6 +148,229 @@ def run_surgery_head_ranking(
             checkpoint_path=Path(checkpoint),
         )
         all_rows.extend(checkpoint_rows)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        for row in all_rows:
+            handle.write(json.dumps(row) + "\n")
+    return all_rows
+
+
+def _heads_to_string_list(heads: Sequence[Tuple[int, int]]) -> List[str]:
+    return [f"L{layer}H{head}" for layer, head in heads]
+
+
+def _build_ablation_hooks(
+    ablated_heads: Sequence[Tuple[int, int]],
+) -> List[Tuple[str, Any]]:
+    grouped: Dict[int, List[int]] = defaultdict(list)
+    for layer, head in ablated_heads:
+        grouped[layer].append(head)
+
+    hooks: List[Tuple[str, Any]] = []
+    for layer, heads in grouped.items():
+        unique_heads = sorted(set(heads))
+
+        def _make_hook(head_indices: List[int]) -> Any:
+            def _ablate_hook(value: torch.Tensor, hook: Any) -> torch.Tensor:
+                patched = value.clone()
+                patched[:, :, head_indices, :] = 0.0
+                return patched
+
+            return _ablate_hook
+
+        hooks.append((f"blocks.{layer}.attn.hook_z", _make_hook(unique_heads)))
+    return hooks
+
+
+@torch.inference_mode()
+def _evaluate_split_with_ablation(
+    model: torch.nn.Module,
+    tokens: torch.Tensor,
+    labels: torch.Tensor,
+    batch_size: int,
+    ablated_heads: Sequence[Tuple[int, int]],
+) -> float:
+    model.eval()
+    total = int(tokens.shape[0])
+    if total == 0:
+        raise ValueError("Cannot evaluate empty split.")
+
+    hooks = _build_ablation_hooks(ablated_heads) if ablated_heads else []
+    correct = 0
+    with model.hooks(fwd_hooks=hooks):
+        for start in range(0, total, batch_size):
+            end = min(start + batch_size, total)
+            batch_tokens = tokens[start:end].to(model.cfg.device)
+            batch_labels = labels[start:end].to(model.cfg.device)
+            logits = model(batch_tokens)[:, -1, :]
+            predictions = logits.argmax(dim=-1)
+            correct += int((predictions == batch_labels).sum().item())
+
+    return correct / total
+
+
+def run_surgery_ablation_sweep(
+    cfg: Config,
+    output_path: Path = Path("results/metrics/surgery_ablations.jsonl"),
+) -> List[Dict[str, Any]]:
+    cfg.validate()
+    cfg.validate_surgery()
+
+    dataset = get_dataset(cfg, data_seed=cfg.surgery.seed)
+    train_tokens, train_labels = dataset.train_data()
+    test_tokens, test_labels = dataset.test_data()
+
+    all_rows: List[Dict[str, Any]] = []
+    for checkpoint_index, checkpoint in enumerate(cfg.surgery.checkpoint_paths):
+        checkpoint_path = Path(checkpoint)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        ranked_rows = rank_heads_by_correct_logit_attribution(
+            cfg=cfg,
+            checkpoint_path=checkpoint_path,
+        )
+        ranked_heads = [(row["layer"], row["head"]) for row in ranked_rows]
+        all_heads = [
+            (layer, head)
+            for layer in range(cfg.model.n_layers)
+            for head in range(cfg.model.n_heads)
+        ]
+
+        model = get_model(cfg, seed=cfg.surgery.seed)
+        model.load_state_dict(_load_model_state_dict(checkpoint_path))
+        model.eval()
+
+        baseline_train_acc = _evaluate_split_with_ablation(
+            model=model,
+            tokens=train_tokens,
+            labels=train_labels,
+            batch_size=cfg.surgery.eval_batch_size,
+            ablated_heads=[],
+        )
+        baseline_test_acc = _evaluate_split_with_ablation(
+            model=model,
+            tokens=test_tokens,
+            labels=test_labels,
+            batch_size=cfg.surgery.eval_batch_size,
+            ablated_heads=[],
+        )
+        all_rows.append(
+            {
+                "checkpoint_path": str(checkpoint_path),
+                "condition": "baseline",
+                "k": 0,
+                "random_repeat": None,
+                "num_ablated_heads": 0,
+                "ablated_heads": [],
+                "train_acc": baseline_train_acc,
+                "test_acc": baseline_test_acc,
+                "baseline_train_acc": baseline_train_acc,
+                "baseline_test_acc": baseline_test_acc,
+            }
+        )
+
+        for k in cfg.surgery.top_k:
+            if k > len(ranked_heads):
+                raise ValueError(
+                    f"Requested top_k={k} exceeds available heads={len(ranked_heads)}"
+                )
+            top_k_heads = ranked_heads[:k]
+            topk_train_acc = _evaluate_split_with_ablation(
+                model=model,
+                tokens=train_tokens,
+                labels=train_labels,
+                batch_size=cfg.surgery.eval_batch_size,
+                ablated_heads=top_k_heads,
+            )
+            topk_test_acc = _evaluate_split_with_ablation(
+                model=model,
+                tokens=test_tokens,
+                labels=test_labels,
+                batch_size=cfg.surgery.eval_batch_size,
+                ablated_heads=top_k_heads,
+            )
+            all_rows.append(
+                {
+                    "checkpoint_path": str(checkpoint_path),
+                    "condition": "top_k",
+                    "k": k,
+                    "random_repeat": None,
+                    "num_ablated_heads": len(top_k_heads),
+                    "ablated_heads": _heads_to_string_list(top_k_heads),
+                    "train_acc": topk_train_acc,
+                    "test_acc": topk_test_acc,
+                    "baseline_train_acc": baseline_train_acc,
+                    "baseline_test_acc": baseline_test_acc,
+                }
+            )
+
+            for repeat in range(cfg.surgery.random_control_repeats):
+                generator = torch.Generator().manual_seed(
+                    cfg.surgery.seed + checkpoint_index * 10_000 + k * 100 + repeat
+                )
+                perm = torch.randperm(len(all_heads), generator=generator)
+                sampled_indices = perm[:k].tolist()
+                sampled_heads = [all_heads[idx] for idx in sampled_indices]
+
+                random_train_acc = _evaluate_split_with_ablation(
+                    model=model,
+                    tokens=train_tokens,
+                    labels=train_labels,
+                    batch_size=cfg.surgery.eval_batch_size,
+                    ablated_heads=sampled_heads,
+                )
+                random_test_acc = _evaluate_split_with_ablation(
+                    model=model,
+                    tokens=test_tokens,
+                    labels=test_labels,
+                    batch_size=cfg.surgery.eval_batch_size,
+                    ablated_heads=sampled_heads,
+                )
+                all_rows.append(
+                    {
+                        "checkpoint_path": str(checkpoint_path),
+                        "condition": "random_k",
+                        "k": k,
+                        "random_repeat": repeat,
+                        "num_ablated_heads": len(sampled_heads),
+                        "ablated_heads": _heads_to_string_list(sampled_heads),
+                        "train_acc": random_train_acc,
+                        "test_acc": random_test_acc,
+                        "baseline_train_acc": baseline_train_acc,
+                        "baseline_test_acc": baseline_test_acc,
+                    }
+                )
+
+        all_head_train_acc = _evaluate_split_with_ablation(
+            model=model,
+            tokens=train_tokens,
+            labels=train_labels,
+            batch_size=cfg.surgery.eval_batch_size,
+            ablated_heads=all_heads,
+        )
+        all_head_test_acc = _evaluate_split_with_ablation(
+            model=model,
+            tokens=test_tokens,
+            labels=test_labels,
+            batch_size=cfg.surgery.eval_batch_size,
+            ablated_heads=all_heads,
+        )
+        all_rows.append(
+            {
+                "checkpoint_path": str(checkpoint_path),
+                "condition": "all_heads",
+                "k": len(all_heads),
+                "random_repeat": None,
+                "num_ablated_heads": len(all_heads),
+                "ablated_heads": _heads_to_string_list(all_heads),
+                "train_acc": all_head_train_acc,
+                "test_acc": all_head_test_acc,
+                "baseline_train_acc": baseline_train_acc,
+                "baseline_test_acc": baseline_test_acc,
+            }
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
