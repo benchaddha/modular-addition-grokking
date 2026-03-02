@@ -70,6 +70,7 @@ class SurgeryConfig:
     top_k: List[int] = field(default_factory=lambda: [1, 2, 3, 4])
     random_control_repeats: int = 3
     eval_batch_size: int = 2048
+    ranking_metric: str = "dla_abs_score"
     min_baseline_train_acc: float = 0.95
     min_baseline_test_acc: float = 0.95
     causal_train_floor: float = 0.90
@@ -136,6 +137,11 @@ class Config:
             raise ValueError("surgery.probe_max_examples must be >= 0.")
         if self.surgery.eval_batch_size <= 0:
             raise ValueError("surgery.eval_batch_size must be > 0.")
+        if self.surgery.ranking_metric not in {"grad_abs_score", "dla_abs_score"}:
+            raise ValueError(
+                "surgery.ranking_metric must be either 'grad_abs_score' or "
+                "'dla_abs_score'."
+            )
         if self.surgery.random_control_repeats < 0:
             raise ValueError("surgery.random_control_repeats must be >= 0.")
         if not 0.0 < self.surgery.causal_train_floor <= 1.0:

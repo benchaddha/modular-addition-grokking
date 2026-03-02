@@ -28,12 +28,13 @@ logging:
 
 surgery:
   checkpoint_paths:
-    - results/checkpoints/replace_with_checkpoint.pt
+    - results/archive/baseline-20260211-190208/checkpoints/5ars4vck_final.pt
   probe_split: test
   probe_max_examples: 512
   top_k: [1, 2]
   random_control_repeats: 1
   eval_batch_size: 512
+  ranking_metric: dla_abs_score
   min_baseline_train_acc: 0.95
   min_baseline_test_acc: 0.95
   causal_train_floor: 0.90

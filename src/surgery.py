@@ -74,11 +74,19 @@ def rank_heads_by_correct_logit_attribution(
 
     n_layers = int(model.cfg.n_layers)
     n_heads = int(model.cfg.n_heads)
-    signed_sum = torch.zeros((n_layers, n_heads), dtype=torch.float64)
-    abs_sum = torch.zeros((n_layers, n_heads), dtype=torch.float64)
+    grad_signed_sum = torch.zeros((n_layers, n_heads), dtype=torch.float64)
+    grad_abs_sum = torch.zeros((n_layers, n_heads), dtype=torch.float64)
+    dla_signed_sum = torch.zeros((n_layers, n_heads), dtype=torch.float64)
+    dla_abs_sum = torch.zeros((n_layers, n_heads), dtype=torch.float64)
     num_examples = int(tokens.shape[0])
     if num_examples == 0:
         raise ValueError("Probe split produced zero examples.")
+
+    # CPU copies for deterministic DLA projection with cached activations.
+    w_u_cpu = model.W_U.detach().float().cpu()  # [d_model, d_vocab_out]
+    w_o_by_layer_cpu = [
+        model.blocks[layer].attn.W_O.detach().float().cpu() for layer in range(n_layers)
+    ]  # each [head, d_head, d_model]
 
     batch_size = cfg.surgery.eval_batch_size
     for start in range(0, num_examples, batch_size):
@@ -97,6 +105,10 @@ def rank_heads_by_correct_logit_attribution(
         correct_logits.mean().backward()
         model.reset_hooks()
 
+        batch_labels_cpu = batch_labels.detach().cpu()
+        # [batch, d_model] each row is W_U[:, target_token]
+        target_unembed = w_u_cpu[:, batch_labels_cpu].T.contiguous()
+
         for layer in range(n_layers):
             key = f"blocks.{layer}.attn.hook_z"
             grad_key = f"{key}_grad"
@@ -107,11 +119,20 @@ def rank_heads_by_correct_logit_attribution(
             z = cache[key][:, -1, :, :]
             z_grad = cache[grad_key][:, -1, :, :]
             contributions = (z * z_grad).sum(dim=-1)  # [batch, head]
-            signed_sum[layer] += contributions.sum(dim=0, dtype=torch.float64)
-            abs_sum[layer] += contributions.abs().sum(dim=0, dtype=torch.float64)
+            grad_signed_sum[layer] += contributions.sum(dim=0, dtype=torch.float64)
+            grad_abs_sum[layer] += contributions.abs().sum(dim=0, dtype=torch.float64)
 
-    signed_mean = signed_sum / num_examples
-    abs_mean = abs_sum / num_examples
+            # DLA: z -> head output via W_O -> projection onto correct-token unembed.
+            # z: [batch, head, d_head], W_O: [head, d_head, d_model]
+            head_out = torch.einsum("bhd,hdm->bhm", z.float(), w_o_by_layer_cpu[layer])
+            dla_contrib = torch.einsum("bhm,bm->bh", head_out, target_unembed)
+            dla_signed_sum[layer] += dla_contrib.sum(dim=0, dtype=torch.float64)
+            dla_abs_sum[layer] += dla_contrib.abs().sum(dim=0, dtype=torch.float64)
+
+    grad_signed_mean = grad_signed_sum / num_examples
+    grad_abs_mean = grad_abs_sum / num_examples
+    dla_signed_mean = dla_signed_sum / num_examples
+    dla_abs_mean = dla_abs_sum / num_examples
 
     rows: List[Dict[str, Any]] = []
     for layer in range(n_layers):
@@ -123,13 +144,21 @@ def rank_heads_by_correct_logit_attribution(
                     "probe_examples": num_examples,
                     "layer": layer,
                     "head": head,
-                    "score": float(signed_mean[layer, head].item()),
-                    "abs_score": float(abs_mean[layer, head].item()),
+                    # Back-compat aliases kept as gradient-based values.
+                    "score": float(grad_signed_mean[layer, head].item()),
+                    "abs_score": float(grad_abs_mean[layer, head].item()),
+                    "grad_score": float(grad_signed_mean[layer, head].item()),
+                    "grad_abs_score": float(grad_abs_mean[layer, head].item()),
+                    "dla_score": float(dla_signed_mean[layer, head].item()),
+                    "dla_abs_score": float(dla_abs_mean[layer, head].item()),
                 }
             )
 
-    rows.sort(key=lambda row: row["abs_score"], reverse=True)
+    ranking_metric = cfg.surgery.ranking_metric
+    rows.sort(key=lambda row: row[ranking_metric], reverse=True)
     for rank, row in enumerate(rows, start=1):
+        row["ranking_metric"] = ranking_metric
+        row["ranking_score"] = row[ranking_metric]
         row["rank"] = rank
     return rows
 
