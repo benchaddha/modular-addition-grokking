@@ -40,6 +40,9 @@ class TrainingConfig:
     batch_size: int = 64
     epochs: int = 10_000
     eval_every: int = 100
+    checkpoint_milestones: List[float] = field(
+        default_factory=lambda: [0.80, 0.90, 0.95, 0.99]
+    )
 
 
 @dataclass
@@ -79,6 +82,21 @@ class SurgeryConfig:
 
 
 @dataclass
+class FourierAblationConfig:
+    checkpoint_paths: List[str] = field(
+        default_factory=lambda: ["results/checkpoints/replace_with_checkpoint.pt"]
+    )
+    sites: List[str] = field(default_factory=lambda: ["post_embed", "pre_unembed"])
+    sweep_mode: str = "all_singles"
+    top_k_values: List[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
+    custom_frequency_sets: List[List[int]] = field(default_factory=list)
+    eval_batch_size: int = 2048
+    causal_train_floor: float = 0.90
+    causal_test_chance_multiplier: float = 2.0
+    seed: int = 123
+
+
+@dataclass
 class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
@@ -87,6 +105,9 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     physics: PhysicsConfig = field(default_factory=PhysicsConfig)
     surgery: SurgeryConfig = field(default_factory=SurgeryConfig)
+    fourier_ablation: FourierAblationConfig = field(
+        default_factory=FourierAblationConfig
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -115,6 +136,20 @@ class Config:
             raise ValueError("model.d_model must equal model.n_heads * model.d_head.")
         if self.train.batch_size <= 0:
             raise ValueError("train.batch_size must be > 0.")
+        if self.train.eval_every <= 0:
+            raise ValueError("train.eval_every must be > 0.")
+        if any(
+            threshold <= 0.0 or threshold > 1.0
+            for threshold in self.train.checkpoint_milestones
+        ):
+            raise ValueError(
+                "train.checkpoint_milestones values must be in the range (0, 1]."
+            )
+        unique_sorted_milestones = sorted(set(self.train.checkpoint_milestones))
+        if unique_sorted_milestones != self.train.checkpoint_milestones:
+            raise ValueError(
+                "train.checkpoint_milestones must be unique and sorted ascending."
+            )
         if self.physics.max_epochs <= 0:
             raise ValueError("physics.max_epochs must be > 0.")
         if self.physics.eval_every <= 0:
@@ -127,6 +162,7 @@ class Config:
             if not 0.0 < threshold <= 1.0:
                 raise ValueError("physics.grok_thresholds must be in the range (0, 1].")
         self.validate_surgery()
+        self.validate_fourier_ablation()
 
     def validate_surgery(self) -> None:
         if not self.surgery.checkpoint_paths:
@@ -155,6 +191,73 @@ class Config:
         unique_sorted = sorted(set(self.surgery.top_k))
         if unique_sorted != self.surgery.top_k:
             raise ValueError("surgery.top_k must be unique and sorted ascending.")
+
+    def validate_fourier_ablation(self) -> None:
+        if not self.fourier_ablation.checkpoint_paths:
+            raise ValueError("fourier_ablation.checkpoint_paths must be non-empty.")
+        if not self.fourier_ablation.sites:
+            raise ValueError("fourier_ablation.sites must be non-empty.")
+        allowed_sites = {"post_embed", "pre_unembed"}
+        if any(site not in allowed_sites for site in self.fourier_ablation.sites):
+            raise ValueError(
+                "fourier_ablation.sites must be drawn from "
+                "{'post_embed', 'pre_unembed'}."
+            )
+        if self.fourier_ablation.sweep_mode not in {
+            "all_singles",
+            "top_k",
+            "custom",
+        }:
+            raise ValueError(
+                "fourier_ablation.sweep_mode must be one of "
+                "{'all_singles', 'top_k', 'custom'}."
+            )
+        if self.fourier_ablation.eval_batch_size <= 0:
+            raise ValueError("fourier_ablation.eval_batch_size must be > 0.")
+        if not 0.0 < self.fourier_ablation.causal_train_floor <= 1.0:
+            raise ValueError(
+                "fourier_ablation.causal_train_floor must be in the range (0, 1]."
+            )
+        if self.fourier_ablation.causal_test_chance_multiplier <= 0.0:
+            raise ValueError(
+                "fourier_ablation.causal_test_chance_multiplier must be > 0."
+            )
+
+        max_frequency = (self.model.p - 1) // 2
+        if self.fourier_ablation.sweep_mode == "top_k":
+            if not self.fourier_ablation.top_k_values:
+                raise ValueError(
+                    "fourier_ablation.top_k_values must be non-empty for top_k mode."
+                )
+            if any(value <= 0 for value in self.fourier_ablation.top_k_values):
+                raise ValueError("fourier_ablation.top_k_values must be > 0.")
+            unique_sorted = sorted(set(self.fourier_ablation.top_k_values))
+            if unique_sorted != self.fourier_ablation.top_k_values:
+                raise ValueError(
+                    "fourier_ablation.top_k_values must be unique and sorted "
+                    "ascending."
+                )
+            if any(value > max_frequency for value in self.fourier_ablation.top_k_values):
+                raise ValueError(
+                    "fourier_ablation.top_k_values cannot exceed the number of "
+                    "available frequencies."
+                )
+        if self.fourier_ablation.sweep_mode == "custom":
+            if not self.fourier_ablation.custom_frequency_sets:
+                raise ValueError(
+                    "fourier_ablation.custom_frequency_sets must be non-empty for "
+                    "custom mode."
+                )
+            for freq_set in self.fourier_ablation.custom_frequency_sets:
+                if not freq_set:
+                    raise ValueError(
+                        "fourier_ablation.custom_frequency_sets entries must be non-empty."
+                    )
+                if any(freq <= 0 or freq > max_frequency for freq in freq_set):
+                    raise ValueError(
+                        "fourier_ablation.custom_frequency_sets entries must contain "
+                        "frequencies in 1..(p-1)//2."
+                    )
 
 
 def _update_dataclass(instance: Any, updates: Dict[str, Any]) -> None:

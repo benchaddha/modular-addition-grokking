@@ -2,7 +2,7 @@ import os
 import random
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -21,6 +21,31 @@ def set_global_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def _checkpoint_payload(
+    cfg: Config,
+    epoch: int,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    metrics: Optional[Dict[str, float]],
+    checkpoint_type: str,
+    checkpoint_threshold: Optional[float] = None,
+) -> Dict[str, Any]:
+    return {
+        "epoch": epoch,
+        "cfg": cfg.to_dict(),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "metrics": metrics,
+        "checkpoint_type": checkpoint_type,
+        "checkpoint_threshold": checkpoint_threshold,
+    }
+
+
+def _checkpoint_suffix_for_threshold(threshold: float) -> str:
+    percentage = int(round(threshold * 100))
+    return f"testacc_{percentage:02d}"
 
 
 def train(cfg: Config) -> List[Dict[str, float]]:
@@ -57,6 +82,7 @@ def train(cfg: Config) -> List[Dict[str, float]]:
     history: List[Dict[str, float]] = []
     train_size = train_tokens.shape[0]
     best_test_acc = float("-inf")
+    saved_milestones = set()
     pbar = tqdm(range(cfg.train.epochs), desc="training")
 
     try:
@@ -99,16 +125,35 @@ def train(cfg: Config) -> List[Dict[str, float]]:
                 with metrics_path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(row) + "\n")
 
+                for threshold in cfg.train.checkpoint_milestones:
+                    if threshold in saved_milestones or test_acc < threshold:
+                        continue
+                    saved_milestones.add(threshold)
+                    torch.save(
+                        _checkpoint_payload(
+                            cfg=cfg,
+                            epoch=epoch,
+                            model=model,
+                            optimizer=optimizer,
+                            metrics=row,
+                            checkpoint_type="milestone",
+                            checkpoint_threshold=threshold,
+                        ),
+                        checkpoints_dir
+                        / f"{run_id}_{_checkpoint_suffix_for_threshold(threshold)}.pt",
+                    )
+
                 if test_acc > best_test_acc:
                     best_test_acc = test_acc
                     torch.save(
-                        {
-                            "epoch": epoch,
-                            "cfg": cfg.to_dict(),
-                            "model_state_dict": model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
-                            "metrics": row,
-                        },
+                        _checkpoint_payload(
+                            cfg=cfg,
+                            epoch=epoch,
+                            model=model,
+                            optimizer=optimizer,
+                            metrics=row,
+                            checkpoint_type="best",
+                        ),
                         checkpoints_dir / f"{run_id}_best.pt",
                     )
                 pbar.set_description(
@@ -116,13 +161,14 @@ def train(cfg: Config) -> List[Dict[str, float]]:
                 )
     finally:
         torch.save(
-            {
-                "epoch": cfg.train.epochs - 1,
-                "cfg": cfg.to_dict(),
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "metrics": history[-1] if history else None,
-            },
+            _checkpoint_payload(
+                cfg=cfg,
+                epoch=cfg.train.epochs - 1,
+                model=model,
+                optimizer=optimizer,
+                metrics=history[-1] if history else None,
+                checkpoint_type="final",
+            ),
             checkpoints_dir / f"{run_id}_final.pt",
         )
         run.finish()

@@ -1,0 +1,55 @@
+model:
+  p: 113
+  d_model: 128
+  n_layers: 1
+  n_heads: 4
+  d_head: 32
+  d_mlp: 512
+  n_ctx: 3
+  act_fn: relu
+  normalization_type: null
+
+data:
+  frac_train: 0.3
+
+optim:
+  lr: 0.001
+  weight_decay: 1.0
+
+train:
+  seed: 52
+  batch_size: 64
+  epochs: 10000
+  eval_every: 100
+  checkpoint_milestones: [0.80, 0.90, 0.95, 0.99]
+
+logging:
+  wandb_project: grokking-demo
+  run_name: fourier-ablation-smoke
+
+surgery:
+  checkpoint_paths:
+    - results/baseline_seed_sweep_run2_phase2/seed_52/artifacts/gdakyvpg_testacc_95.pt
+  probe_split: test
+  probe_max_examples: 0
+  top_k: [1]
+  random_control_repeats: 0
+  eval_batch_size: 1024
+  ranking_metric: dla_abs_score
+  min_baseline_train_acc: 0.80
+  min_baseline_test_acc: 0.80
+  causal_train_floor: 0.90
+  causal_test_chance_multiplier: 2.0
+  seed: 123
+
+fourier_ablation:
+  checkpoint_paths:
+    - results/baseline_seed_sweep_run2_phase2/seed_52/artifacts/gdakyvpg_testacc_95.pt
+  sites: [post_embed, pre_unembed]
+  sweep_mode: top_k
+  top_k_values: [1]
+  custom_frequency_sets: []
+  eval_batch_size: 1024
+  causal_train_floor: 0.90
+  causal_test_chance_multiplier: 2.0
+  seed: 123

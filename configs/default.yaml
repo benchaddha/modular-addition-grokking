@@ -21,6 +21,7 @@ train:
   batch_size: 64
   epochs: 10000
   eval_every: 100
+  checkpoint_milestones: [0.80, 0.90, 0.95, 0.99]
 
 logging:
   wandb_project: grokking-demo

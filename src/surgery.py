@@ -10,8 +10,15 @@ from .dataset import get_dataset
 from .model import get_model
 
 
-def _load_model_state_dict(checkpoint_path: Path) -> Dict[str, torch.Tensor]:
+def _load_checkpoint_payload(checkpoint_path: Path) -> Dict[str, Any]:
     payload = torch.load(checkpoint_path, map_location="cpu")
+    if isinstance(payload, dict):
+        return payload
+    raise ValueError(f"Unsupported checkpoint format at {checkpoint_path}")
+
+
+def _load_model_state_dict(checkpoint_path: Path) -> Dict[str, torch.Tensor]:
+    payload = _load_checkpoint_payload(checkpoint_path)
     if isinstance(payload, dict) and "model_state_dict" in payload:
         return payload["model_state_dict"]
     if isinstance(payload, dict):
@@ -189,6 +196,42 @@ def _heads_to_string_list(heads: Sequence[Tuple[int, int]]) -> List[str]:
     return [f"L{layer}H{head}" for layer, head in heads]
 
 
+def _subset_label(heads: Sequence[Tuple[int, int]]) -> str:
+    if not heads:
+        return "none"
+    return "+".join(_heads_to_string_list(heads))
+
+
+def _all_heads(cfg: Config) -> List[Tuple[int, int]]:
+    return [
+        (layer, head)
+        for layer in range(cfg.model.n_layers)
+        for head in range(cfg.model.n_heads)
+    ]
+
+
+def _enumerate_head_subsets(
+    all_heads: Sequence[Tuple[int, int]],
+    max_heads: int = 10,
+) -> List[List[Tuple[int, int]]]:
+    total_heads = len(all_heads)
+    if total_heads > max_heads:
+        raise ValueError(
+            f"Exhaustive subset ablation is disabled for total_heads={total_heads}; "
+            f"max supported is {max_heads}."
+        )
+
+    subsets: List[List[Tuple[int, int]]] = []
+    for mask in range(1 << total_heads):
+        subset = [
+            all_heads[index]
+            for index in range(total_heads)
+            if (mask >> index) & 1
+        ]
+        subsets.append(subset)
+    return subsets
+
+
 def _build_ablation_hooks(
     ablated_heads: Sequence[Tuple[int, int]],
 ) -> List[Tuple[str, Any]]:
@@ -261,11 +304,7 @@ def run_surgery_ablation_sweep(
             checkpoint_path=checkpoint_path,
         )
         ranked_heads = [(row["layer"], row["head"]) for row in ranked_rows]
-        all_heads = [
-            (layer, head)
-            for layer in range(cfg.model.n_layers)
-            for head in range(cfg.model.n_heads)
-        ]
+        all_heads = _all_heads(cfg)
 
         model = get_model(cfg, seed=cfg.surgery.seed)
         model.load_state_dict(_load_model_state_dict(checkpoint_path))
@@ -400,6 +439,98 @@ def run_surgery_ablation_sweep(
                 "baseline_test_acc": baseline_test_acc,
             }
         )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        for row in all_rows:
+            handle.write(json.dumps(row) + "\n")
+    return all_rows
+
+
+def run_exhaustive_subset_ablation(
+    cfg: Config,
+    output_path: Path = Path("results/metrics/surgery_exhaustive_subsets.jsonl"),
+) -> List[Dict[str, Any]]:
+    cfg.validate()
+    cfg.validate_surgery()
+
+    dataset = get_dataset(cfg, data_seed=cfg.surgery.seed)
+    train_tokens, train_labels = dataset.train_data()
+    test_tokens, test_labels = dataset.test_data()
+    all_heads = _all_heads(cfg)
+    subsets = _enumerate_head_subsets(all_heads=all_heads)
+
+    all_rows: List[Dict[str, Any]] = []
+    for checkpoint in cfg.surgery.checkpoint_paths:
+        checkpoint_path = Path(checkpoint)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        checkpoint_payload = _load_checkpoint_payload(checkpoint_path)
+        checkpoint_epoch = checkpoint_payload.get("epoch")
+        checkpoint_type = checkpoint_payload.get("checkpoint_type")
+        checkpoint_threshold = checkpoint_payload.get("checkpoint_threshold")
+
+        model = get_model(cfg, seed=cfg.surgery.seed)
+        model.load_state_dict(_load_model_state_dict(checkpoint_path))
+        model.eval()
+
+        baseline_train_acc = _evaluate_split_with_ablation(
+            model=model,
+            tokens=train_tokens,
+            labels=train_labels,
+            batch_size=cfg.surgery.eval_batch_size,
+            ablated_heads=[],
+        )
+        baseline_test_acc = _evaluate_split_with_ablation(
+            model=model,
+            tokens=test_tokens,
+            labels=test_labels,
+            batch_size=cfg.surgery.eval_batch_size,
+            ablated_heads=[],
+        )
+
+        for subset_index, subset_heads in enumerate(subsets):
+            train_acc = _evaluate_split_with_ablation(
+                model=model,
+                tokens=train_tokens,
+                labels=train_labels,
+                batch_size=cfg.surgery.eval_batch_size,
+                ablated_heads=subset_heads,
+            )
+            test_acc = _evaluate_split_with_ablation(
+                model=model,
+                tokens=test_tokens,
+                labels=test_labels,
+                batch_size=cfg.surgery.eval_batch_size,
+                ablated_heads=subset_heads,
+            )
+            train_drop = baseline_train_acc - train_acc
+            test_drop = baseline_test_acc - test_acc
+            all_rows.append(
+                {
+                    "checkpoint_path": str(checkpoint_path),
+                    "checkpoint_epoch": checkpoint_epoch,
+                    "checkpoint_type": checkpoint_type,
+                    "checkpoint_threshold": checkpoint_threshold,
+                    "subset_index": subset_index,
+                    "subset_label": _subset_label(subset_heads),
+                    "num_ablated_heads": len(subset_heads),
+                    "ablated_heads": _heads_to_string_list(subset_heads),
+                    "train_acc": train_acc,
+                    "test_acc": test_acc,
+                    "baseline_train_acc": baseline_train_acc,
+                    "baseline_test_acc": baseline_test_acc,
+                    "train_drop": train_drop,
+                    "test_drop": test_drop,
+                    "selective_gap": test_drop - train_drop,
+                    "strong_h2_pass": (
+                        test_acc
+                        <= (cfg.surgery.causal_test_chance_multiplier / cfg.model.p)
+                        and train_acc >= cfg.surgery.causal_train_floor
+                    ),
+                }
+            )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:

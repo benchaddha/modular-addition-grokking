@@ -10,8 +10,9 @@ from tqdm import tqdm
 
 from .config import Config
 from .dataset import build_batch_schedule, get_dataset
+from .fourier_ablation import run_fourier_ablation_sweep
 from .model import get_model
-from .surgery import run_surgery_ablation_sweep
+from .surgery import run_exhaustive_subset_ablation, run_surgery_ablation_sweep
 from .train_physics import clone_state_dict, train_physics_run
 
 
@@ -526,4 +527,502 @@ def run_hypothesis_b_surgery(cfg: Config) -> Dict[str, Any]:
         "num_checkpoints": len(summary_rows),
         "num_gate_pass": sum(1 for row in summary_rows if row["gate_pass"]),
         "num_causal_pass": sum(1 for row in summary_rows if row["causal_pass"]),
+    }
+
+
+def _checkpoint_stage_label(row: Dict[str, Any]) -> str:
+    threshold = row.get("checkpoint_threshold")
+    if threshold is not None:
+        return f"testacc_{int(round(float(threshold) * 100)):02d}"
+    checkpoint_type = row.get("checkpoint_type")
+    if checkpoint_type:
+        return str(checkpoint_type)
+    return Path(row["checkpoint_path"]).name
+
+
+def _build_transition_pilot_summary_rows(
+    exhaustive_rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    rows_by_checkpoint: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in exhaustive_rows:
+        rows_by_checkpoint[row["checkpoint_path"]].append(row)
+
+    summary_rows: List[Dict[str, Any]] = []
+    for checkpoint_path, checkpoint_rows in sorted(
+        rows_by_checkpoint.items(),
+        key=lambda item: (
+            item[1][0].get("checkpoint_epoch") is None,
+            item[1][0].get("checkpoint_epoch") or 0,
+            item[0],
+        ),
+    ):
+        baseline_rows = [row for row in checkpoint_rows if row["num_ablated_heads"] == 0]
+        if len(baseline_rows) != 1:
+            raise ValueError(f"Expected one baseline row for {checkpoint_path}.")
+        baseline = baseline_rows[0]
+        candidate_rows = [row for row in checkpoint_rows if row["num_ablated_heads"] > 0]
+        best_selective = max(
+            candidate_rows,
+            key=lambda row: (
+                float(row["selective_gap"]),
+                -float(row["test_acc"]),
+                float(row["train_acc"]),
+            ),
+        )
+        strong_pass_rows = [row for row in candidate_rows if row["strong_h2_pass"]]
+        best_strong_pass = None
+        if strong_pass_rows:
+            best_strong_pass = max(
+                strong_pass_rows,
+                key=lambda row: (
+                    float(row["selective_gap"]),
+                    float(row["train_acc"]),
+                ),
+            )
+
+        summary_rows.append(
+            {
+                "checkpoint_path": checkpoint_path,
+                "checkpoint_epoch": baseline.get("checkpoint_epoch"),
+                "checkpoint_type": baseline.get("checkpoint_type"),
+                "checkpoint_threshold": baseline.get("checkpoint_threshold"),
+                "checkpoint_stage": _checkpoint_stage_label(baseline),
+                "baseline_train_acc": baseline["baseline_train_acc"],
+                "baseline_test_acc": baseline["baseline_test_acc"],
+                "best_subset_label": best_selective["subset_label"],
+                "best_subset_train_acc": best_selective["train_acc"],
+                "best_subset_test_acc": best_selective["test_acc"],
+                "best_subset_selective_gap": best_selective["selective_gap"],
+                "strong_h2_any_pass": bool(strong_pass_rows),
+                "strong_h2_subset_label": (
+                    best_strong_pass["subset_label"] if best_strong_pass else None
+                ),
+                "strong_h2_train_acc": (
+                    best_strong_pass["train_acc"] if best_strong_pass else None
+                ),
+                "strong_h2_test_acc": (
+                    best_strong_pass["test_acc"] if best_strong_pass else None
+                ),
+            }
+        )
+
+    return summary_rows
+
+
+def _write_transition_pilot_heatmap(
+    exhaustive_rows: Sequence[Dict[str, Any]],
+    output_path: Path,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_order = sorted(
+        {row["checkpoint_path"] for row in exhaustive_rows},
+        key=lambda checkpoint_path: (
+            next(
+                row.get("checkpoint_epoch") is None
+                for row in exhaustive_rows
+                if row["checkpoint_path"] == checkpoint_path
+            ),
+            next(
+                row.get("checkpoint_epoch") or 0
+                for row in exhaustive_rows
+                if row["checkpoint_path"] == checkpoint_path
+            ),
+            checkpoint_path,
+        ),
+    )
+    subset_order = sorted(
+        {row["subset_label"] for row in exhaustive_rows},
+        key=lambda label: (
+            next(
+                row["num_ablated_heads"]
+                for row in exhaustive_rows
+                if row["subset_label"] == label
+            ),
+            label,
+        ),
+    )
+
+    z_values: List[List[float]] = []
+    y_labels: List[str] = []
+    for checkpoint_path in checkpoint_order:
+        checkpoint_rows = [
+            row for row in exhaustive_rows if row["checkpoint_path"] == checkpoint_path
+        ]
+        row_lookup = {row["subset_label"]: row for row in checkpoint_rows}
+        z_values.append([float(row_lookup[label]["test_acc"]) for label in subset_order])
+        y_labels.append(_checkpoint_stage_label(checkpoint_rows[0]))
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z_values,
+            x=subset_order,
+            y=y_labels,
+            colorscale="Viridis",
+            colorbar=dict(title="Test Accuracy"),
+        )
+    )
+    fig.update_layout(
+        title="Transition Pilot: Exhaustive Head-Subset Test Accuracy",
+        xaxis_title="Ablated Head Subset",
+        yaxis_title="Checkpoint Stage",
+        template="plotly_white",
+    )
+    fig.write_html(output_path)
+    return output_path
+
+
+def _write_transition_pilot_scatter(
+    exhaustive_rows: Sequence[Dict[str, Any]],
+    output_path: Path,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig = go.Figure()
+
+    checkpoint_order = sorted(
+        {row["checkpoint_path"] for row in exhaustive_rows},
+        key=lambda checkpoint_path: (
+            next(
+                row.get("checkpoint_epoch") is None
+                for row in exhaustive_rows
+                if row["checkpoint_path"] == checkpoint_path
+            ),
+            next(
+                row.get("checkpoint_epoch") or 0
+                for row in exhaustive_rows
+                if row["checkpoint_path"] == checkpoint_path
+            ),
+            checkpoint_path,
+        ),
+    )
+
+    for checkpoint_path in checkpoint_order:
+        checkpoint_rows = [
+            row for row in exhaustive_rows if row["checkpoint_path"] == checkpoint_path
+        ]
+        fig.add_trace(
+            go.Scatter(
+                x=[float(row["train_acc"]) for row in checkpoint_rows],
+                y=[float(row["test_acc"]) for row in checkpoint_rows],
+                mode="markers+text",
+                text=[row["subset_label"] for row in checkpoint_rows],
+                textposition="top center",
+                name=_checkpoint_stage_label(checkpoint_rows[0]),
+            )
+        )
+
+    fig.add_trace(
+        go.Scatter(
+            x=[0.0, 1.0],
+            y=[0.0, 1.0],
+            mode="lines",
+            line=dict(dash="dash", color="gray"),
+            name="Train = Test",
+        )
+    )
+    fig.update_layout(
+        title="Transition Pilot: Train vs Test Accuracy Under Exhaustive Ablation",
+        xaxis_title="Train Accuracy",
+        yaxis_title="Test Accuracy",
+        template="plotly_white",
+    )
+    fig.write_html(output_path)
+    return output_path
+
+
+def _write_transition_pilot_report(
+    summary_rows: Sequence[Dict[str, Any]],
+    output_path: Path,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    strong_pass_count = sum(1 for row in summary_rows if row["strong_h2_any_pass"])
+    lines = [
+        "# Hypothesis B Transition Pilot (Draft)",
+        "",
+        f"- Checkpoints evaluated: {len(summary_rows)}",
+        f"- Strong H2 passes: {strong_pass_count}",
+        "",
+        "## Per-checkpoint summary",
+        "| checkpoint_stage | epoch | baseline_train | baseline_test | best_subset | "
+        "best_subset_train | best_subset_test | selective_gap | strong_h2_pass |",
+        "|---|---:|---:|---:|---|---:|---:|---:|---:|",
+    ]
+    for row in summary_rows:
+        lines.append(
+            f"| {row['checkpoint_stage']} | "
+            f"{row['checkpoint_epoch']} | "
+            f"{row['baseline_train_acc']:.4f} | "
+            f"{row['baseline_test_acc']:.4f} | "
+            f"{row['best_subset_label']} | "
+            f"{row['best_subset_train_acc']:.4f} | "
+            f"{row['best_subset_test_acc']:.4f} | "
+            f"{row['best_subset_selective_gap']:.4f} | "
+            f"{int(bool(row['strong_h2_any_pass']))} |"
+        )
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return output_path
+
+
+def run_hypothesis_b_transition_pilot(cfg: Config) -> Dict[str, Any]:
+    cfg.validate()
+    cfg.validate_surgery()
+
+    metrics_dir = Path("results") / "metrics"
+    figures_dir = Path("results") / "figures"
+    reports_dir = Path("results") / "reports"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    exhaustive_path = metrics_dir / "surgery_transition_pilot_exhaustive.jsonl"
+    exhaustive_rows = run_exhaustive_subset_ablation(
+        cfg=cfg,
+        output_path=exhaustive_path,
+    )
+
+    summary_rows = _build_transition_pilot_summary_rows(exhaustive_rows=exhaustive_rows)
+    summary_path = metrics_dir / "surgery_transition_pilot_summary.csv"
+    _write_summary_csv(summary_path, summary_rows)
+
+    heatmap_path = _write_transition_pilot_heatmap(
+        exhaustive_rows=exhaustive_rows,
+        output_path=figures_dir / "hypothesis_b_transition_pilot_heatmap.html",
+    )
+    scatter_path = _write_transition_pilot_scatter(
+        exhaustive_rows=exhaustive_rows,
+        output_path=figures_dir / "hypothesis_b_transition_pilot_scatter.html",
+    )
+    report_path = _write_transition_pilot_report(
+        summary_rows=summary_rows,
+        output_path=reports_dir / "hypothesis_b_transition_pilot.md",
+    )
+
+    return {
+        "exhaustive_path": str(exhaustive_path),
+        "summary_path": str(summary_path),
+        "heatmap_path": str(heatmap_path),
+        "scatter_path": str(scatter_path),
+        "report_path": str(report_path),
+        "num_checkpoints": len(summary_rows),
+        "num_rows": len(exhaustive_rows),
+        "num_strong_h2_pass": sum(1 for row in summary_rows if row["strong_h2_any_pass"]),
+    }
+
+
+def _build_fourier_ablation_summary_rows(
+    ablation_rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    rows_by_checkpoint_and_site: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for row in ablation_rows:
+        rows_by_checkpoint_and_site[(row["checkpoint_path"], row["site"])].append(row)
+
+    summary_rows: List[Dict[str, Any]] = []
+    for (checkpoint_path, site), group_rows in sorted(
+        rows_by_checkpoint_and_site.items(),
+        key=lambda item: (
+            item[1][0].get("checkpoint_epoch") is None,
+            item[1][0].get("checkpoint_epoch") or 0,
+            item[0][1],
+            item[0][0],
+        ),
+    ):
+        baseline_rows = [row for row in group_rows if row["frequency_set_label"] == "baseline"]
+        if len(baseline_rows) != 1:
+            raise ValueError(
+                f"Expected one baseline Fourier row for {checkpoint_path} at site={site}."
+            )
+        baseline = baseline_rows[0]
+        candidate_rows = [
+            row for row in group_rows if row["frequency_set_label"] != "baseline"
+        ]
+        best_selective = max(
+            candidate_rows,
+            key=lambda row: (
+                float(row["selective_gap"]),
+                -float(row["test_acc"]),
+                float(row["train_acc"]),
+            ),
+        )
+        strong_rows = [row for row in candidate_rows if row["strong_h2_pass"]]
+        best_strong = None
+        if strong_rows:
+            best_strong = max(
+                strong_rows,
+                key=lambda row: (float(row["selective_gap"]), float(row["train_acc"])),
+            )
+
+        summary_rows.append(
+            {
+                "checkpoint_path": checkpoint_path,
+                "checkpoint_epoch": baseline.get("checkpoint_epoch"),
+                "checkpoint_type": baseline.get("checkpoint_type"),
+                "checkpoint_threshold": baseline.get("checkpoint_threshold"),
+                "site": site,
+                "baseline_train_acc": baseline["baseline_train_acc"],
+                "baseline_test_acc": baseline["baseline_test_acc"],
+                "best_frequency_set_label": best_selective["frequency_set_label"],
+                "best_frequencies": best_selective["frequencies"],
+                "best_frequency_train_acc": best_selective["train_acc"],
+                "best_frequency_test_acc": best_selective["test_acc"],
+                "best_frequency_selective_gap": best_selective["selective_gap"],
+                "strong_h2_any_pass": bool(strong_rows),
+                "strong_h2_frequency_set_label": (
+                    best_strong["frequency_set_label"] if best_strong else None
+                ),
+                "strong_h2_train_acc": best_strong["train_acc"] if best_strong else None,
+                "strong_h2_test_acc": best_strong["test_acc"] if best_strong else None,
+            }
+        )
+
+    return summary_rows
+
+
+def _write_fourier_single_frequency_heatmap(
+    ablation_rows: Sequence[Dict[str, Any]],
+    output_path: Path,
+) -> Path:
+    single_rows = [row for row in ablation_rows if row["num_frequencies"] == 1]
+    if not single_rows:
+        raise ValueError("No single-frequency rows available for heatmap output.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    key_order = sorted(
+        {(row["checkpoint_path"], row["site"]) for row in single_rows},
+        key=lambda key: (
+            next(
+                row.get("checkpoint_epoch") is None
+                for row in single_rows
+                if row["checkpoint_path"] == key[0] and row["site"] == key[1]
+            ),
+            next(
+                row.get("checkpoint_epoch") or 0
+                for row in single_rows
+                if row["checkpoint_path"] == key[0] and row["site"] == key[1]
+            ),
+            key[1],
+            key[0],
+        ),
+    )
+    frequency_order = sorted(
+        {
+            int(row["frequencies"][0])
+            for row in single_rows
+            if row["frequency_set_label"] != "baseline"
+        }
+    )
+
+    z_values: List[List[float]] = []
+    y_labels: List[str] = []
+    for checkpoint_path, site in key_order:
+        key_rows = [
+            row
+            for row in single_rows
+            if row["checkpoint_path"] == checkpoint_path and row["site"] == site
+        ]
+        row_lookup = {int(row["frequencies"][0]): row for row in key_rows if row["frequencies"]}
+        z_values.append([float(row_lookup[freq]["test_acc"]) for freq in frequency_order])
+        stage = _checkpoint_stage_label(key_rows[0])
+        y_labels.append(f"{stage}:{site}")
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z_values,
+            x=frequency_order,
+            y=y_labels,
+            colorscale="Viridis",
+            colorbar=dict(title="Test Accuracy"),
+        )
+    )
+    fig.update_layout(
+        title="Fourier Ablation: Single-Frequency Test Accuracy",
+        xaxis_title="Frequency",
+        yaxis_title="Checkpoint Stage / Site",
+        template="plotly_white",
+    )
+    fig.write_html(output_path)
+    return output_path
+
+
+def _write_fourier_ablation_report(
+    summary_rows: Sequence[Dict[str, Any]],
+    output_path: Path,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    strong_pass_count = sum(1 for row in summary_rows if row["strong_h2_any_pass"])
+    lines = [
+        "# Fourier Ablation Results (Draft)",
+        "",
+        f"- Checkpoint/site pairs evaluated: {len(summary_rows)}",
+        f"- Strong H2 passes: {strong_pass_count}",
+        "",
+        "## Per-checkpoint summary",
+        "| checkpoint_stage | site | baseline_train | baseline_test | best_frequency_set | "
+        "best_train | best_test | selective_gap | strong_h2_pass |",
+        "|---|---|---:|---:|---|---:|---:|---:|---:|",
+    ]
+    for row in summary_rows:
+        stage = _checkpoint_stage_label(row)
+        lines.append(
+            f"| {stage} | "
+            f"{row['site']} | "
+            f"{row['baseline_train_acc']:.4f} | "
+            f"{row['baseline_test_acc']:.4f} | "
+            f"{row['best_frequency_set_label']} | "
+            f"{row['best_frequency_train_acc']:.4f} | "
+            f"{row['best_frequency_test_acc']:.4f} | "
+            f"{row['best_frequency_selective_gap']:.4f} | "
+            f"{int(bool(row['strong_h2_any_pass']))} |"
+        )
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return output_path
+
+
+def run_fourier_ablation(cfg: Config) -> Dict[str, Any]:
+    cfg.validate()
+    cfg.validate_fourier_ablation()
+
+    metrics_dir = Path("results") / "metrics"
+    figures_dir = Path("results") / "figures"
+    reports_dir = Path("results") / "reports"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    sweep_outputs = run_fourier_ablation_sweep(cfg)
+    score_rows = sweep_outputs["score_rows"]
+    ablation_rows = sweep_outputs["ablation_rows"]
+
+    scores_path = metrics_dir / "fourier_frequency_scores.jsonl"
+    _write_jsonl(scores_path, score_rows)
+
+    ablations_path = metrics_dir / "fourier_ablation_runs.jsonl"
+    _write_jsonl(ablations_path, ablation_rows)
+
+    summary_rows = _build_fourier_ablation_summary_rows(ablation_rows=ablation_rows)
+    summary_path = metrics_dir / "fourier_ablation_summary.csv"
+    _write_summary_csv(summary_path, summary_rows)
+
+    heatmap_path = None
+    single_frequency_rows = [row for row in ablation_rows if row["num_frequencies"] == 1]
+    if single_frequency_rows:
+        heatmap_path = _write_fourier_single_frequency_heatmap(
+            ablation_rows=single_frequency_rows,
+            output_path=figures_dir / "fourier_ablation_single_frequency_heatmap.html",
+        )
+
+    report_path = _write_fourier_ablation_report(
+        summary_rows=summary_rows,
+        output_path=reports_dir / "fourier_ablation_results_draft.md",
+    )
+
+    return {
+        "scores_path": str(scores_path),
+        "ablations_path": str(ablations_path),
+        "summary_path": str(summary_path),
+        "heatmap_path": str(heatmap_path) if heatmap_path is not None else None,
+        "report_path": str(report_path),
+        "num_score_rows": len(score_rows),
+        "num_ablation_rows": len(ablation_rows),
+        "num_checkpoint_site_pairs": len(summary_rows),
+        "num_strong_h2_pass": sum(1 for row in summary_rows if row["strong_h2_any_pass"]),
     }
