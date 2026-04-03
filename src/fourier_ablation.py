@@ -1,3 +1,4 @@
+import hashlib
 import math
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -128,6 +129,7 @@ def make_freq_ablation_hook(
     fourier_basis: Dict[int, torch.Tensor],
     model: torch.nn.Module,
     site: str,
+    intervention_mode: str = "ablate_selected",
     positions: Optional[Sequence[int]] = None,
 ) -> Callable:
     residual_directions = _residual_directions_for_site(
@@ -141,15 +143,27 @@ def make_freq_ablation_hook(
         raise ValueError("freqs_to_ablate must be non-empty.")
 
     direction_basis = _orthonormalize_rows(torch.cat(selected_directions, dim=0))
+    full_fourier_basis = _orthonormalize_rows(
+        torch.cat(list(residual_directions.values()), dim=0)
+    )
     target_positions = list(_site_positions(model, site) if positions is None else positions)
 
     def _ablation_hook(value: torch.Tensor, hook: Any) -> torch.Tensor:
         basis = direction_basis.to(device=value.device, dtype=value.dtype)
+        full_basis = full_fourier_basis.to(device=value.device, dtype=value.dtype)
         patched = value.clone()
         selected = patched[:, target_positions, :]
         coeffs = torch.einsum("bpd,fd->bpf", selected, basis)
-        reconstruction = torch.einsum("bpf,fd->bpd", coeffs, basis)
-        patched[:, target_positions, :] = selected - reconstruction
+        selected_reconstruction = torch.einsum("bpf,fd->bpd", coeffs, basis)
+        if intervention_mode == "ablate_selected":
+            patched[:, target_positions, :] = selected - selected_reconstruction
+            return patched
+        if intervention_mode == "keep_only_selected":
+            full_coeffs = torch.einsum("bpd,fd->bpf", selected, full_basis)
+            full_reconstruction = torch.einsum("bpf,fd->bpd", full_coeffs, full_basis)
+            patched[:, target_positions, :] = selected - full_reconstruction + selected_reconstruction
+            return patched
+        raise ValueError(f"Unsupported intervention_mode: {intervention_mode}")
         return patched
 
     return _ablation_hook
@@ -196,12 +210,26 @@ def _checkpoint_config_or_default(
     return cfg
 
 
+def _stable_random_seed(
+    *,
+    base_seed: int,
+    checkpoint_path: str,
+    k: int,
+    repeat_index: int,
+) -> int:
+    material = f"{base_seed}:{checkpoint_path}:{k}:{repeat_index}".encode("utf-8")
+    digest = hashlib.sha256(material).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False) % (2**31)
+
+
 def _frequency_sets_from_config(
     cfg: Config,
     score_rows: Sequence[Dict[str, Any]],
+    checkpoint_path: str,
 ) -> List[Dict[str, Any]]:
     max_frequency = (cfg.model.p - 1) // 2
     mode = cfg.fourier_ablation.sweep_mode
+    ranked_frequencies = [int(row["frequency"]) for row in score_rows]
 
     if mode == "all_singles":
         return [
@@ -209,20 +237,73 @@ def _frequency_sets_from_config(
                 "label": f"freq_{frequency:02d}",
                 "frequencies": [frequency],
                 "selection_mode": mode,
+                "selection_family": "single",
+                "repeat_index": 0,
             }
             for frequency in range(1, max_frequency + 1)
         ]
 
     if mode == "top_k":
-        ranked_frequencies = [int(row["frequency"]) for row in score_rows]
         return [
             {
                 "label": f"top_{k}",
                 "frequencies": ranked_frequencies[:k],
                 "selection_mode": mode,
+                "selection_family": "top",
+                "repeat_index": 0,
             }
             for k in cfg.fourier_ablation.top_k_values
         ]
+
+    if mode == "multi_frequency":
+        frequency_sets: List[Dict[str, Any]] = []
+        for k in cfg.fourier_ablation.top_k_values:
+            frequency_sets.append(
+                {
+                    "label": f"top_{k}",
+                    "frequencies": ranked_frequencies[:k],
+                    "selection_mode": mode,
+                    "selection_family": "top",
+                    "repeat_index": 0,
+                }
+            )
+
+        for k in cfg.fourier_ablation.bottom_k_values:
+            frequency_sets.append(
+                {
+                    "label": f"bottom_{k}",
+                    "frequencies": ranked_frequencies[-k:],
+                    "selection_mode": mode,
+                    "selection_family": "bottom",
+                    "repeat_index": 0,
+                }
+            )
+
+        all_frequencies = torch.tensor(ranked_frequencies, dtype=torch.long)
+        for k in cfg.fourier_ablation.random_k_values:
+            for repeat_index in range(1, cfg.fourier_ablation.random_control_repeats + 1):
+                generator = torch.Generator()
+                generator.manual_seed(
+                    _stable_random_seed(
+                        base_seed=cfg.fourier_ablation.seed,
+                        checkpoint_path=checkpoint_path,
+                        k=k,
+                        repeat_index=repeat_index,
+                    )
+                )
+                perm = torch.randperm(int(all_frequencies.shape[0]), generator=generator)
+                random_frequencies = all_frequencies[perm[:k]].tolist()
+                frequency_sets.append(
+                    {
+                        "label": f"random_{k}_rep{repeat_index}",
+                        "frequencies": sorted(int(freq) for freq in random_frequencies),
+                        "selection_mode": mode,
+                        "selection_family": "random",
+                        "repeat_index": repeat_index,
+                    }
+                )
+
+        return frequency_sets
 
     if mode == "custom":
         return [
@@ -230,6 +311,8 @@ def _frequency_sets_from_config(
                 "label": "custom_" + "_".join(str(freq) for freq in freq_set),
                 "frequencies": list(freq_set),
                 "selection_mode": mode,
+                "selection_family": "custom",
+                "repeat_index": 0,
             }
             for freq_set in cfg.fourier_ablation.custom_frequency_sets
         ]
@@ -282,7 +365,11 @@ def run_fourier_ablation_sweep(cfg: Config) -> Dict[str, List[Dict[str, Any]]]:
         )
 
         fourier_basis = build_fourier_basis(checkpoint_cfg.model.p)
-        frequency_sets = _frequency_sets_from_config(cfg=checkpoint_cfg, score_rows=score_rows)
+        frequency_sets = _frequency_sets_from_config(
+            cfg=checkpoint_cfg,
+            score_rows=score_rows,
+            checkpoint_path=str(checkpoint_path),
+        )
         chance_threshold = (
             checkpoint_cfg.fourier_ablation.causal_test_chance_multiplier
             / checkpoint_cfg.model.p
@@ -296,10 +383,13 @@ def run_fourier_ablation_sweep(cfg: Config) -> Dict[str, List[Dict[str, Any]]]:
                     "checkpoint_type": checkpoint_payload.get("checkpoint_type"),
                     "checkpoint_threshold": checkpoint_payload.get("checkpoint_threshold"),
                     "site": site,
+                    "intervention_mode": checkpoint_cfg.fourier_ablation.intervention_mode,
                     "selection_mode": "baseline",
+                    "selection_family": "baseline",
                     "frequency_set_label": "baseline",
                     "frequencies": [],
                     "num_frequencies": 0,
+                    "repeat_index": 0,
                     "train_acc": baseline_train_acc,
                     "test_acc": baseline_test_acc,
                     "baseline_train_acc": baseline_train_acc,
@@ -318,6 +408,7 @@ def run_fourier_ablation_sweep(cfg: Config) -> Dict[str, List[Dict[str, Any]]]:
                     fourier_basis=fourier_basis,
                     model=model,
                     site=site,
+                    intervention_mode=checkpoint_cfg.fourier_ablation.intervention_mode,
                 )
                 train_acc = _evaluate_with_optional_hook(
                     model=model,
@@ -344,10 +435,13 @@ def run_fourier_ablation_sweep(cfg: Config) -> Dict[str, List[Dict[str, Any]]]:
                         "checkpoint_type": checkpoint_payload.get("checkpoint_type"),
                         "checkpoint_threshold": checkpoint_payload.get("checkpoint_threshold"),
                         "site": site,
+                        "intervention_mode": checkpoint_cfg.fourier_ablation.intervention_mode,
                         "selection_mode": frequency_set["selection_mode"],
+                        "selection_family": frequency_set["selection_family"],
                         "frequency_set_label": frequency_set["label"],
                         "frequencies": frequency_set["frequencies"],
                         "num_frequencies": len(frequency_set["frequencies"]),
+                        "repeat_index": frequency_set["repeat_index"],
                         "train_acc": train_acc,
                         "test_acc": test_acc,
                         "baseline_train_acc": baseline_train_acc,

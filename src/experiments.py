@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import plotly.graph_objects as go
 import torch
+from plotly.subplots import make_subplots
 from tqdm import tqdm
 
 from .config import Config
@@ -540,6 +541,27 @@ def _checkpoint_stage_label(row: Dict[str, Any]) -> str:
     return Path(row["checkpoint_path"]).name
 
 
+def _fourier_intervention_titles(
+    ablation_rows: Sequence[Dict[str, Any]],
+) -> Tuple[str, str, str]:
+    intervention_mode = "ablate_selected"
+    if ablation_rows:
+        intervention_mode = str(
+            ablation_rows[0].get("intervention_mode", "ablate_selected")
+        )
+    if intervention_mode == "keep_only_selected":
+        return (
+            "Fourier Sufficiency",
+            "Number of Frequencies Kept",
+            "Fourier Sufficiency Results (Draft)",
+        )
+    return (
+        "Fourier Ablation",
+        "Number of Frequencies Ablated",
+        "Fourier Ablation Results (Draft)",
+    )
+
+
 def _build_transition_pilot_summary_rows(
     exhaustive_rows: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -835,6 +857,7 @@ def _build_fourier_ablation_summary_rows(
         candidate_rows = [
             row for row in group_rows if row["frequency_set_label"] != "baseline"
         ]
+        intervention_mode = str(baseline.get("intervention_mode", "ablate_selected"))
         best_selective = max(
             candidate_rows,
             key=lambda row: (
@@ -851,6 +874,55 @@ def _build_fourier_ablation_summary_rows(
                 key=lambda row: (float(row["selective_gap"]), float(row["train_acc"])),
             )
 
+        top_rows = [row for row in candidate_rows if row.get("selection_family") == "top"]
+        bottom_rows = [
+            row for row in candidate_rows if row.get("selection_family") == "bottom"
+        ]
+        random_rows = [
+            row for row in candidate_rows if row.get("selection_family") == "random"
+        ]
+        max_top_k = max((int(row["num_frequencies"]) for row in top_rows), default=None)
+
+        def _find_by_k(rows: Sequence[Dict[str, Any]], k: int) -> Dict[str, Any] | None:
+            return next((row for row in rows if int(row["num_frequencies"]) == k), None)
+
+        def _mean_metric(
+            rows: Sequence[Dict[str, Any]],
+            k: int,
+            metric: str,
+        ) -> float | None:
+            matching = [float(row[metric]) for row in rows if int(row["num_frequencies"]) == k]
+            if not matching:
+                return None
+            return sum(matching) / len(matching)
+
+        top_1 = _find_by_k(top_rows, 1)
+        top_2 = _find_by_k(top_rows, 2)
+        top_3 = _find_by_k(top_rows, 3)
+        top_5 = _find_by_k(top_rows, 5)
+        top_10 = _find_by_k(top_rows, 10)
+        top_full = _find_by_k(top_rows, max_top_k) if max_top_k is not None else None
+        bottom_5 = _find_by_k(bottom_rows, 5)
+        random_5_mean_train = _mean_metric(random_rows, 5, "train_acc")
+        random_5_mean_test = _mean_metric(random_rows, 5, "test_acc")
+
+        best_nontrivial_row = None
+        if intervention_mode == "keep_only_selected":
+            nontrivial_rows = [
+                row
+                for row in candidate_rows
+                if max_top_k is None or int(row["num_frequencies"]) < max_top_k
+            ]
+            if nontrivial_rows:
+                best_nontrivial_row = max(
+                    nontrivial_rows,
+                    key=lambda row: (
+                        float(row["test_acc"]),
+                        float(row["train_acc"]),
+                        -int(row["num_frequencies"]),
+                    ),
+                )
+
         summary_rows.append(
             {
                 "checkpoint_path": checkpoint_path,
@@ -858,19 +930,61 @@ def _build_fourier_ablation_summary_rows(
                 "checkpoint_type": baseline.get("checkpoint_type"),
                 "checkpoint_threshold": baseline.get("checkpoint_threshold"),
                 "site": site,
+                "intervention_mode": intervention_mode,
                 "baseline_train_acc": baseline["baseline_train_acc"],
                 "baseline_test_acc": baseline["baseline_test_acc"],
-                "best_frequency_set_label": best_selective["frequency_set_label"],
-                "best_frequencies": best_selective["frequencies"],
-                "best_frequency_train_acc": best_selective["train_acc"],
-                "best_frequency_test_acc": best_selective["test_acc"],
-                "best_frequency_selective_gap": best_selective["selective_gap"],
+                "best_frequency_set_label": (
+                    best_nontrivial_row["frequency_set_label"]
+                    if best_nontrivial_row is not None
+                    else best_selective["frequency_set_label"]
+                ),
+                "best_frequencies": (
+                    best_nontrivial_row["frequencies"]
+                    if best_nontrivial_row is not None
+                    else best_selective["frequencies"]
+                ),
+                "best_frequency_train_acc": (
+                    best_nontrivial_row["train_acc"]
+                    if best_nontrivial_row is not None
+                    else best_selective["train_acc"]
+                ),
+                "best_frequency_test_acc": (
+                    best_nontrivial_row["test_acc"]
+                    if best_nontrivial_row is not None
+                    else best_selective["test_acc"]
+                ),
+                "best_frequency_selective_gap": (
+                    best_nontrivial_row["selective_gap"]
+                    if best_nontrivial_row is not None
+                    else best_selective["selective_gap"]
+                ),
                 "strong_h2_any_pass": bool(strong_rows),
                 "strong_h2_frequency_set_label": (
                     best_strong["frequency_set_label"] if best_strong else None
                 ),
                 "strong_h2_train_acc": best_strong["train_acc"] if best_strong else None,
                 "strong_h2_test_acc": best_strong["test_acc"] if best_strong else None,
+                "top_1_train_acc": top_1["train_acc"] if top_1 else None,
+                "top_1_test_acc": top_1["test_acc"] if top_1 else None,
+                "top_2_train_acc": top_2["train_acc"] if top_2 else None,
+                "top_2_test_acc": top_2["test_acc"] if top_2 else None,
+                "top_3_train_acc": top_3["train_acc"] if top_3 else None,
+                "top_3_test_acc": top_3["test_acc"] if top_3 else None,
+                "top_5_train_acc": top_5["train_acc"] if top_5 else None,
+                "top_5_test_acc": top_5["test_acc"] if top_5 else None,
+                "top_10_train_acc": top_10["train_acc"] if top_10 else None,
+                "top_10_test_acc": top_10["test_acc"] if top_10 else None,
+                "top_full_train_acc": top_full["train_acc"] if top_full else None,
+                "top_full_test_acc": top_full["test_acc"] if top_full else None,
+                "bottom_5_train_acc": bottom_5["train_acc"] if bottom_5 else None,
+                "bottom_5_test_acc": bottom_5["test_acc"] if bottom_5 else None,
+                "random_5_mean_train_acc": random_5_mean_train,
+                "random_5_mean_test_acc": random_5_mean_test,
+                "top_5_test_retention": (
+                    float(top_5["test_acc"]) / float(baseline["baseline_test_acc"])
+                    if top_5 and float(baseline["baseline_test_acc"]) > 0.0
+                    else None
+                ),
             }
         )
 
@@ -920,7 +1034,12 @@ def _write_fourier_single_frequency_heatmap(
             if row["checkpoint_path"] == checkpoint_path and row["site"] == site
         ]
         row_lookup = {int(row["frequencies"][0]): row for row in key_rows if row["frequencies"]}
-        z_values.append([float(row_lookup[freq]["test_acc"]) for freq in frequency_order])
+        z_values.append(
+            [
+                float(row_lookup[freq]["test_acc"]) if freq in row_lookup else None
+                for freq in frequency_order
+            ]
+        )
         stage = _checkpoint_stage_label(key_rows[0])
         y_labels.append(f"{stage}:{site}")
 
@@ -943,36 +1062,334 @@ def _write_fourier_single_frequency_heatmap(
     return output_path
 
 
+def _write_fourier_reconstruction_curve(
+    ablation_rows: Sequence[Dict[str, Any]],
+    output_path: Path,
+) -> Path:
+    multi_rows = [
+        row
+        for row in ablation_rows
+        if row.get("selection_family") in {"top", "bottom", "random"}
+    ]
+    if not multi_rows:
+        raise ValueError("No multi-frequency ablation rows available for reconstruction output.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure_title, x_axis_title, _ = _fourier_intervention_titles(ablation_rows)
+    key_order = sorted(
+        {(row["checkpoint_path"], row["site"]) for row in multi_rows},
+        key=lambda key: (
+            next(
+                row.get("checkpoint_epoch") is None
+                for row in multi_rows
+                if row["checkpoint_path"] == key[0] and row["site"] == key[1]
+            ),
+            next(
+                row.get("checkpoint_epoch") or 0
+                for row in multi_rows
+                if row["checkpoint_path"] == key[0] and row["site"] == key[1]
+            ),
+            key[1],
+            key[0],
+        ),
+    )
+
+    fig = make_subplots(
+        rows=len(key_order),
+        cols=1,
+        shared_xaxes=False,
+        subplot_titles=[
+            f"{_checkpoint_stage_label(next(row for row in multi_rows if row['checkpoint_path'] == checkpoint_path and row['site'] == site))}:{site}"
+            for checkpoint_path, site in key_order
+        ],
+    )
+
+    for row_index, (checkpoint_path, site) in enumerate(key_order, start=1):
+        group_rows = [
+            row
+            for row in ablation_rows
+            if row["checkpoint_path"] == checkpoint_path and row["site"] == site
+        ]
+        baseline = next(row for row in group_rows if row["frequency_set_label"] == "baseline")
+        top_rows = sorted(
+            (row for row in group_rows if row.get("selection_family") == "top"),
+            key=lambda row: row["num_frequencies"],
+        )
+        bottom_rows = sorted(
+            (row for row in group_rows if row.get("selection_family") == "bottom"),
+            key=lambda row: row["num_frequencies"],
+        )
+        random_rows = [
+            row for row in group_rows if row.get("selection_family") == "random"
+        ]
+
+        x_values = sorted(
+            {int(row["num_frequencies"]) for row in group_rows if row["num_frequencies"] > 0}
+        )
+        if x_values:
+            fig.add_trace(
+                go.Scatter(
+                    x=x_values,
+                    y=[float(baseline["baseline_train_acc"])] * len(x_values),
+                    mode="lines",
+                    line=dict(dash="dash", color="#1f77b4"),
+                    name="Baseline Train",
+                    showlegend=row_index == 1,
+                    legendgroup="baseline_train",
+                ),
+                row=row_index,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=x_values,
+                    y=[float(baseline["baseline_test_acc"])] * len(x_values),
+                    mode="lines",
+                    line=dict(dash="dash", color="#ff7f0e"),
+                    name="Baseline Test",
+                    showlegend=row_index == 1,
+                    legendgroup="baseline_test",
+                ),
+                row=row_index,
+                col=1,
+            )
+
+        if top_rows:
+            fig.add_trace(
+                go.Scatter(
+                    x=[int(row["num_frequencies"]) for row in top_rows],
+                    y=[float(row["train_acc"]) for row in top_rows],
+                    mode="lines+markers",
+                    line=dict(color="#1f77b4"),
+                    name="Top-k Train",
+                    showlegend=row_index == 1,
+                    legendgroup="top_train",
+                ),
+                row=row_index,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=[int(row["num_frequencies"]) for row in top_rows],
+                    y=[float(row["test_acc"]) for row in top_rows],
+                    mode="lines+markers",
+                    line=dict(color="#ff7f0e"),
+                    name="Top-k Test",
+                    showlegend=row_index == 1,
+                    legendgroup="top_test",
+                ),
+                row=row_index,
+                col=1,
+            )
+
+        if bottom_rows:
+            fig.add_trace(
+                go.Scatter(
+                    x=[int(row["num_frequencies"]) for row in bottom_rows],
+                    y=[float(row["train_acc"]) for row in bottom_rows],
+                    mode="markers",
+                    marker=dict(color="#2ca02c", symbol="square", size=10),
+                    name="Bottom-k Train",
+                    showlegend=row_index == 1,
+                    legendgroup="bottom_train",
+                ),
+                row=row_index,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=[int(row["num_frequencies"]) for row in bottom_rows],
+                    y=[float(row["test_acc"]) for row in bottom_rows],
+                    mode="markers",
+                    marker=dict(color="#d62728", symbol="square", size=10),
+                    name="Bottom-k Test",
+                    showlegend=row_index == 1,
+                    legendgroup="bottom_test",
+                ),
+                row=row_index,
+                col=1,
+            )
+
+        if random_rows:
+            random_by_k: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+            for row in random_rows:
+                random_by_k[int(row["num_frequencies"])].append(row)
+            random_x = sorted(random_by_k)
+            random_train_mean = [
+                sum(float(row["train_acc"]) for row in random_by_k[k]) / len(random_by_k[k])
+                for k in random_x
+            ]
+            random_test_mean = [
+                sum(float(row["test_acc"]) for row in random_by_k[k]) / len(random_by_k[k])
+                for k in random_x
+            ]
+            fig.add_trace(
+                go.Scatter(
+                    x=random_x,
+                    y=random_train_mean,
+                    mode="lines+markers",
+                    line=dict(color="#9467bd"),
+                    name="Random-k Train (mean)",
+                    showlegend=row_index == 1,
+                    legendgroup="random_train",
+                ),
+                row=row_index,
+                col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=random_x,
+                    y=random_test_mean,
+                    mode="lines+markers",
+                    line=dict(color="#8c564b"),
+                    name="Random-k Test (mean)",
+                    showlegend=row_index == 1,
+                    legendgroup="random_test",
+                ),
+                row=row_index,
+                col=1,
+            )
+
+        fig.update_xaxes(title_text=x_axis_title, row=row_index, col=1)
+        fig.update_yaxes(title_text="Accuracy", range=[0.0, 1.05], row=row_index, col=1)
+
+    fig.update_layout(
+        title=f"{figure_title}: Reconstruction Curves",
+        template="plotly_white",
+        height=max(360, 320 * len(key_order)),
+    )
+    fig.write_html(output_path)
+    return output_path
+
+
 def _write_fourier_ablation_report(
     summary_rows: Sequence[Dict[str, Any]],
+    ablation_rows: Sequence[Dict[str, Any]],
     output_path: Path,
 ) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     strong_pass_count = sum(1 for row in summary_rows if row["strong_h2_any_pass"])
+    _, _, report_title = _fourier_intervention_titles(ablation_rows)
     lines = [
-        "# Fourier Ablation Results (Draft)",
+        f"# {report_title}",
         "",
         f"- Checkpoint/site pairs evaluated: {len(summary_rows)}",
         f"- Strong H2 passes: {strong_pass_count}",
         "",
-        "## Per-checkpoint summary",
-        "| checkpoint_stage | site | baseline_train | baseline_test | best_frequency_set | "
-        "best_train | best_test | selective_gap | strong_h2_pass |",
-        "|---|---|---:|---:|---|---:|---:|---:|---:|",
     ]
-    for row in summary_rows:
-        stage = _checkpoint_stage_label(row)
-        lines.append(
-            f"| {stage} | "
-            f"{row['site']} | "
-            f"{row['baseline_train_acc']:.4f} | "
-            f"{row['baseline_test_acc']:.4f} | "
-            f"{row['best_frequency_set_label']} | "
-            f"{row['best_frequency_train_acc']:.4f} | "
-            f"{row['best_frequency_test_acc']:.4f} | "
-            f"{row['best_frequency_selective_gap']:.4f} | "
-            f"{int(bool(row['strong_h2_any_pass']))} |"
+
+    intervention_mode = (
+        str(summary_rows[0].get("intervention_mode", "ablate_selected"))
+        if summary_rows
+        else "ablate_selected"
+    )
+    if intervention_mode == "keep_only_selected":
+        lines.extend(
+            [
+                "## Per-checkpoint sufficiency summary",
+                "| checkpoint_stage | site | baseline_test | top_1_test | top_2_test | top_3_test | top_5_test | top_5_retention | top_10_test | bottom_5_test | random_5_mean_test | top_full_test |",
+                "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
         )
+        for row in summary_rows:
+            stage = _checkpoint_stage_label(row)
+            top_5_retention = (
+                f"{float(row['top_5_test_retention']):.4f}"
+                if row.get("top_5_test_retention") is not None
+                else ""
+            )
+            lines.append(
+                f"| {stage} | "
+                f"{row['site']} | "
+                f"{float(row['baseline_test_acc']):.4f} | "
+                f"{float(row['top_1_test_acc']):.4f} | "
+                f"{float(row['top_2_test_acc']):.4f} | "
+                f"{float(row['top_3_test_acc']):.4f} | "
+                f"{float(row['top_5_test_acc']):.4f} | "
+                f"{top_5_retention} | "
+                f"{float(row['top_10_test_acc']):.4f} | "
+                f"{float(row['bottom_5_test_acc']):.4f} | "
+                f"{float(row['random_5_mean_test_acc']):.4f} | "
+                f"{float(row['top_full_test_acc']):.4f} |"
+            )
+    else:
+        lines.extend(
+            [
+                "## Per-checkpoint summary",
+                "| checkpoint_stage | site | baseline_train | baseline_test | best_frequency_set | "
+                "best_train | best_test | selective_gap | strong_h2_pass |",
+                "|---|---|---:|---:|---|---:|---:|---:|---:|",
+            ]
+        )
+        for row in summary_rows:
+            stage = _checkpoint_stage_label(row)
+            lines.append(
+                f"| {stage} | "
+                f"{row['site']} | "
+                f"{row['baseline_train_acc']:.4f} | "
+                f"{row['baseline_test_acc']:.4f} | "
+                f"{row['best_frequency_set_label']} | "
+                f"{row['best_frequency_train_acc']:.4f} | "
+                f"{row['best_frequency_test_acc']:.4f} | "
+                f"{row['best_frequency_selective_gap']:.4f} | "
+                f"{int(bool(row['strong_h2_any_pass']))} |"
+            )
+
+    multi_rows = [
+        row for row in ablation_rows if row.get("selection_family") in {"top", "bottom", "random"}
+    ]
+    if multi_rows:
+        lines.extend(
+            [
+                "",
+                "## Multi-frequency control snapshot",
+                "| checkpoint_stage | site | top_5_test | bottom_5_test | random_5_mean_test | top_max_test |",
+                "|---|---|---:|---:|---:|---:|",
+            ]
+        )
+        grouped_rows: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        for row in multi_rows:
+            grouped_rows[(row["checkpoint_path"], row["site"])].append(row)
+
+        for (checkpoint_path, site), group_rows in sorted(
+            grouped_rows.items(),
+            key=lambda item: (
+                item[1][0].get("checkpoint_epoch") is None,
+                item[1][0].get("checkpoint_epoch") or 0,
+                item[0][1],
+                item[0][0],
+            ),
+        ):
+            stage = _checkpoint_stage_label(group_rows[0])
+            top_rows = [row for row in group_rows if row.get("selection_family") == "top"]
+            bottom_rows = [row for row in group_rows if row.get("selection_family") == "bottom"]
+            random_rows = [row for row in group_rows if row.get("selection_family") == "random"]
+
+            top_5 = next((row for row in top_rows if int(row["num_frequencies"]) == 5), None)
+            bottom_5 = next(
+                (row for row in bottom_rows if int(row["num_frequencies"]) == 5), None
+            )
+            random_5_rows = [
+                row for row in random_rows if int(row["num_frequencies"]) == 5
+            ]
+            top_max = max(top_rows, key=lambda row: int(row["num_frequencies"])) if top_rows else None
+            random_5_mean = None
+            if random_5_rows:
+                random_5_mean = sum(
+                    float(row["test_acc"]) for row in random_5_rows
+                ) / len(random_5_rows)
+            top_5_test = f"{float(top_5['test_acc']):.4f}" if top_5 else ""
+            bottom_5_test = f"{float(bottom_5['test_acc']):.4f}" if bottom_5 else ""
+            random_5_mean_test = f"{random_5_mean:.4f}" if random_5_mean is not None else ""
+            top_max_test = f"{float(top_max['test_acc']):.4f}" if top_max else ""
+
+            lines.append(
+                f"| {stage} | {site} | "
+                f"{top_5_test} | "
+                f"{bottom_5_test} | "
+                f"{random_5_mean_test} | "
+                f"{top_max_test} |"
+            )
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return output_path
 
@@ -991,28 +1408,41 @@ def run_fourier_ablation(cfg: Config) -> Dict[str, Any]:
     sweep_outputs = run_fourier_ablation_sweep(cfg)
     score_rows = sweep_outputs["score_rows"]
     ablation_rows = sweep_outputs["ablation_rows"]
+    output_stem = cfg.fourier_ablation.output_stem
 
-    scores_path = metrics_dir / "fourier_frequency_scores.jsonl"
+    scores_path = metrics_dir / f"{output_stem}_frequency_scores.jsonl"
     _write_jsonl(scores_path, score_rows)
 
-    ablations_path = metrics_dir / "fourier_ablation_runs.jsonl"
+    ablations_path = metrics_dir / f"{output_stem}_runs.jsonl"
     _write_jsonl(ablations_path, ablation_rows)
 
     summary_rows = _build_fourier_ablation_summary_rows(ablation_rows=ablation_rows)
-    summary_path = metrics_dir / "fourier_ablation_summary.csv"
+    summary_path = metrics_dir / f"{output_stem}_summary.csv"
     _write_summary_csv(summary_path, summary_rows)
 
     heatmap_path = None
+    reconstruction_curve_path = None
     single_frequency_rows = [row for row in ablation_rows if row["num_frequencies"] == 1]
-    if single_frequency_rows:
+    if cfg.fourier_ablation.sweep_mode == "all_singles" and single_frequency_rows:
         heatmap_path = _write_fourier_single_frequency_heatmap(
             ablation_rows=single_frequency_rows,
-            output_path=figures_dir / "fourier_ablation_single_frequency_heatmap.html",
+            output_path=figures_dir / f"{output_stem}_single_frequency_heatmap.html",
+        )
+    multi_frequency_rows = [
+        row
+        for row in ablation_rows
+        if row.get("selection_family") in {"top", "bottom", "random"}
+    ]
+    if multi_frequency_rows:
+        reconstruction_curve_path = _write_fourier_reconstruction_curve(
+            ablation_rows=ablation_rows,
+            output_path=figures_dir / f"{output_stem}_reconstruction_curve.html",
         )
 
     report_path = _write_fourier_ablation_report(
         summary_rows=summary_rows,
-        output_path=reports_dir / "fourier_ablation_results_draft.md",
+        ablation_rows=ablation_rows,
+        output_path=reports_dir / f"{output_stem}_results_draft.md",
     )
 
     return {
@@ -1020,6 +1450,9 @@ def run_fourier_ablation(cfg: Config) -> Dict[str, Any]:
         "ablations_path": str(ablations_path),
         "summary_path": str(summary_path),
         "heatmap_path": str(heatmap_path) if heatmap_path is not None else None,
+        "reconstruction_curve_path": (
+            str(reconstruction_curve_path) if reconstruction_curve_path is not None else None
+        ),
         "report_path": str(report_path),
         "num_score_rows": len(score_rows),
         "num_ablation_rows": len(ablation_rows),

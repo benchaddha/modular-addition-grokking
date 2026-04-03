@@ -28,9 +28,10 @@ logging:
 
 surgery:
   checkpoint_paths:
-    - results/archive/baseline-20260211-190208/checkpoints/5ars4vck_final.pt
-    - results/archive/baseline-20260211-190208/checkpoints/pgzryv8w_final.pt
-    - results/archive/baseline-20260211-190208/checkpoints/qi5po7hz_final.pt
+    - results/baseline_seed_sweep/seed_42/artifacts/8n66rvyq_best.pt
+    - results/baseline_seed_sweep/seed_43/artifacts/r6wijcr3_best.pt
+    - results/baseline_seed_sweep/seed_44/artifacts/7p79rixi_best.pt
+    - results/baseline_seed_sweep/seed_45/artifacts/lt55mtnh_best.pt
   probe_split: test
   probe_max_examples: 0
   top_k: [1, 2, 3, 4]

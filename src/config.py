@@ -87,13 +87,18 @@ class FourierAblationConfig:
         default_factory=lambda: ["results/checkpoints/replace_with_checkpoint.pt"]
     )
     sites: List[str] = field(default_factory=lambda: ["post_embed", "pre_unembed"])
+    intervention_mode: str = "ablate_selected"
     sweep_mode: str = "all_singles"
     top_k_values: List[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
+    bottom_k_values: List[int] = field(default_factory=list)
+    random_k_values: List[int] = field(default_factory=list)
+    random_control_repeats: int = 1
     custom_frequency_sets: List[List[int]] = field(default_factory=list)
     eval_batch_size: int = 2048
     causal_train_floor: float = 0.90
     causal_test_chance_multiplier: float = 2.0
     seed: int = 123
+    output_stem: str = "fourier_ablation"
 
 
 @dataclass
@@ -203,14 +208,23 @@ class Config:
                 "fourier_ablation.sites must be drawn from "
                 "{'post_embed', 'pre_unembed'}."
             )
+        if self.fourier_ablation.intervention_mode not in {
+            "ablate_selected",
+            "keep_only_selected",
+        }:
+            raise ValueError(
+                "fourier_ablation.intervention_mode must be one of "
+                "{'ablate_selected', 'keep_only_selected'}."
+            )
         if self.fourier_ablation.sweep_mode not in {
             "all_singles",
             "top_k",
+            "multi_frequency",
             "custom",
         }:
             raise ValueError(
                 "fourier_ablation.sweep_mode must be one of "
-                "{'all_singles', 'top_k', 'custom'}."
+                "{'all_singles', 'top_k', 'multi_frequency', 'custom'}."
             )
         if self.fourier_ablation.eval_batch_size <= 0:
             raise ValueError("fourier_ablation.eval_batch_size must be > 0.")
@@ -222,12 +236,17 @@ class Config:
             raise ValueError(
                 "fourier_ablation.causal_test_chance_multiplier must be > 0."
             )
+        if self.fourier_ablation.random_control_repeats <= 0:
+            raise ValueError("fourier_ablation.random_control_repeats must be > 0.")
+        if not self.fourier_ablation.output_stem.strip():
+            raise ValueError("fourier_ablation.output_stem must be non-empty.")
 
         max_frequency = (self.model.p - 1) // 2
-        if self.fourier_ablation.sweep_mode == "top_k":
+        if self.fourier_ablation.sweep_mode in {"top_k", "multi_frequency"}:
             if not self.fourier_ablation.top_k_values:
                 raise ValueError(
-                    "fourier_ablation.top_k_values must be non-empty for top_k mode."
+                    "fourier_ablation.top_k_values must be non-empty for "
+                    "top_k/multi_frequency mode."
                 )
             if any(value <= 0 for value in self.fourier_ablation.top_k_values):
                 raise ValueError("fourier_ablation.top_k_values must be > 0.")
@@ -241,6 +260,26 @@ class Config:
                 raise ValueError(
                     "fourier_ablation.top_k_values cannot exceed the number of "
                     "available frequencies."
+                )
+        for field_name in ("bottom_k_values", "random_k_values"):
+            values = getattr(self.fourier_ablation, field_name)
+            if any(value <= 0 for value in values):
+                raise ValueError(f"fourier_ablation.{field_name} must be > 0.")
+            unique_sorted = sorted(set(values))
+            if unique_sorted != values:
+                raise ValueError(
+                    f"fourier_ablation.{field_name} must be unique and sorted ascending."
+                )
+            if any(value > max_frequency for value in values):
+                raise ValueError(
+                    f"fourier_ablation.{field_name} cannot exceed the number of "
+                    "available frequencies."
+                )
+        if self.fourier_ablation.sweep_mode == "multi_frequency":
+            if not self.fourier_ablation.random_k_values:
+                raise ValueError(
+                    "fourier_ablation.random_k_values must be non-empty for "
+                    "multi_frequency mode."
                 )
         if self.fourier_ablation.sweep_mode == "custom":
             if not self.fourier_ablation.custom_frequency_sets:

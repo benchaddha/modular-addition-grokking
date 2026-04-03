@@ -33,6 +33,7 @@ def main() -> None:
     print(f"Ablations: {results['ablations_path']}")
     print(f"Summary: {results['summary_path']}")
     print(f"Heatmap: {results['heatmap_path']}")
+    print(f"Reconstruction curve: {results['reconstruction_curve_path']}")
     print(f"Report: {results['report_path']}")
     print(
         "Checkpoint/site outcomes: "

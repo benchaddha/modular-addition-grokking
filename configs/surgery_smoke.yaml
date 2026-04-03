@@ -28,7 +28,7 @@ logging:
 
 surgery:
   checkpoint_paths:
-    - results/archive/baseline-20260211-190208/checkpoints/5ars4vck_final.pt
+    - results/baseline_seed_sweep/seed_43/artifacts/r6wijcr3_best.pt
   probe_split: test
   probe_max_examples: 512
   top_k: [1, 2]
