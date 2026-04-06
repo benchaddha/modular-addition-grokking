@@ -1,0 +1,67 @@
+model:
+  p: 113
+  d_model: 128
+  n_layers: 1
+  n_heads: 4
+  d_head: 32
+  d_mlp: 512
+  n_ctx: 3
+  act_fn: relu
+  normalization_type: null
+
+data:
+  frac_train: 0.3
+
+optim:
+  lr: 0.001
+  weight_decay: 1.0
+
+train:
+  seed: 6
+  batch_size: 64
+  epochs: 10000
+  eval_every: 100
+  checkpoint_milestones: [0.80, 0.90, 0.95, 0.99]
+
+logging:
+  wandb_project: grokking-demo
+  run_name: fourier-sufficiency-sgld-bridge
+
+surgery:
+  checkpoint_paths:
+    - results/physics_checkpoint_bridge_run2/seed_6/t0/artifacts/physics_seed6_t0_testacc_80.pt
+  probe_split: test
+  probe_max_examples: 0
+  top_k: [1]
+  random_control_repeats: 0
+  eval_batch_size: 2048
+  ranking_metric: dla_abs_score
+  min_baseline_train_acc: 0.80
+  min_baseline_test_acc: 0.80
+  causal_train_floor: 0.90
+  causal_test_chance_multiplier: 2.0
+  seed: 123
+
+fourier_ablation:
+  checkpoint_paths:
+    - results/physics_checkpoint_bridge_run2/seed_6/t0/artifacts/physics_seed6_t0_testacc_80.pt
+    - results/physics_checkpoint_bridge_run2/seed_6/t0/artifacts/physics_seed6_t0_testacc_90.pt
+    - results/physics_checkpoint_bridge_run2/seed_6/t0/artifacts/physics_seed6_t0_testacc_95.pt
+    - results/physics_checkpoint_bridge_run2/seed_6/t0/artifacts/physics_seed6_t0_testacc_99.pt
+    - results/physics_checkpoint_bridge_run2/seed_6/t1e-04/artifacts/physics_seed6_t1e-04_testacc_80.pt
+    - results/physics_checkpoint_bridge_run2/seed_6/t1e-04/artifacts/physics_seed6_t1e-04_testacc_90.pt
+    - results/physics_checkpoint_bridge_run2/seed_6/t1e-04/artifacts/physics_seed6_t1e-04_testacc_95.pt
+    - results/physics_checkpoint_bridge_run2/seed_6/t1e-04/artifacts/physics_seed6_t1e-04_testacc_99.pt
+  sites: [pre_unembed]
+  intervention_mode: keep_only_selected
+  sweep_mode: multi_frequency
+  top_k_values: [1, 2, 3, 5, 10, 56]
+  bottom_k_values: [5]
+  random_k_values: [1, 2, 3, 5, 10, 56]
+  random_control_repeats: 3
+  custom_frequency_sets: []
+  eval_batch_size: 2048
+  causal_train_floor: 0.90
+  causal_test_chance_multiplier: 2.0
+  seed: 123
+  output_stem: fourier_sufficiency_sgld_bridge
