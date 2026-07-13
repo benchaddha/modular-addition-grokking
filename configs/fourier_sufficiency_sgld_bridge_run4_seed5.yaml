@@ -14,7 +14,7 @@ optim:
   lr: 0.001
   weight_decay: 1.0
 train:
-  seed: 7
+  seed: 5
   batch_size: 64
   epochs: 10000
   eval_every: 100
@@ -25,10 +25,10 @@ train:
   - 0.99
 logging:
   wandb_project: grokking-demo
-  run_name: fourier-sufficiency-sgld-bridge-seed7
+  run_name: fourier-sufficiency-sgld-bridge-seed5
 surgery:
   checkpoint_paths:
-  - results/physics_checkpoint_bridge_run3/seed_7/t0/artifacts/physics_seed7_t0_testacc_80.pt
+  - results/physics_checkpoint_bridge_run4/seed_5/t0/artifacts/physics_seed5_t0_testacc_80.pt
   probe_split: test
   probe_max_examples: 0
   top_k:
@@ -43,14 +43,14 @@ surgery:
   seed: 123
 fourier_ablation:
   checkpoint_paths:
-  - results/physics_checkpoint_bridge_run3/seed_7/t0/artifacts/physics_seed7_t0_testacc_80.pt
-  - results/physics_checkpoint_bridge_run3/seed_7/t0/artifacts/physics_seed7_t0_testacc_90.pt
-  - results/physics_checkpoint_bridge_run3/seed_7/t0/artifacts/physics_seed7_t0_testacc_95.pt
-  - results/physics_checkpoint_bridge_run3/seed_7/t0/artifacts/physics_seed7_t0_testacc_99.pt
-  - results/physics_checkpoint_bridge_run3/seed_7/t1e-04/artifacts/physics_seed7_t1e-04_testacc_80.pt
-  - results/physics_checkpoint_bridge_run3/seed_7/t1e-04/artifacts/physics_seed7_t1e-04_testacc_90.pt
-  - results/physics_checkpoint_bridge_run3/seed_7/t1e-04/artifacts/physics_seed7_t1e-04_testacc_95.pt
-  - results/physics_checkpoint_bridge_run3/seed_7/t1e-04/artifacts/physics_seed7_t1e-04_testacc_99.pt
+  - results/physics_checkpoint_bridge_run4/seed_5/t0/artifacts/physics_seed5_t0_testacc_80.pt
+  - results/physics_checkpoint_bridge_run4/seed_5/t0/artifacts/physics_seed5_t0_testacc_90.pt
+  - results/physics_checkpoint_bridge_run4/seed_5/t0/artifacts/physics_seed5_t0_testacc_95.pt
+  - results/physics_checkpoint_bridge_run4/seed_5/t0/artifacts/physics_seed5_t0_testacc_99.pt
+  - results/physics_checkpoint_bridge_run4/seed_5/t1e-04/artifacts/physics_seed5_t1e-04_testacc_80.pt
+  - results/physics_checkpoint_bridge_run4/seed_5/t1e-04/artifacts/physics_seed5_t1e-04_testacc_90.pt
+  - results/physics_checkpoint_bridge_run4/seed_5/t1e-04/artifacts/physics_seed5_t1e-04_testacc_95.pt
+  - results/physics_checkpoint_bridge_run4/seed_5/t1e-04/artifacts/physics_seed5_t1e-04_testacc_99.pt
   sites:
   - pre_unembed
   intervention_mode: keep_only_selected
@@ -77,4 +77,4 @@ fourier_ablation:
   causal_train_floor: 0.9
   causal_test_chance_multiplier: 2.0
   seed: 123
-  output_stem: fourier_sufficiency_sgld_bridge_run3_seed7
+  output_stem: fourier_sufficiency_sgld_bridge_run4_seed5

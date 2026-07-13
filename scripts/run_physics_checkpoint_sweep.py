@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         action='store_true',
         help='Rerun even if seed/temperature summary already exists.',
     )
+    parser.add_argument(
+        '--stop-on-all-thresholds',
+        action='store_true',
+        help='Stop each run once every checkpoint milestone has been saved.',
+    )
     return parser.parse_args()
 
 
@@ -145,7 +150,7 @@ def main() -> None:
                 run_id=run_id,
                 checkpoints_dir=artifacts_dir,
                 metrics_path=metrics_path,
-                stop_on_all_thresholds=False,
+                stop_on_all_thresholds=args.stop_on_all_thresholds,
             )
             hist_summary = _summarize_history(history_run['history'])
             checkpoint_files = sorted(str(path) for path in artifacts_dir.glob('*.pt'))
