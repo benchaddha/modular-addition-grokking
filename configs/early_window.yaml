@@ -1,0 +1,36 @@
+model:
+  p: 113
+  d_model: 128
+  n_layers: 1
+  n_heads: 4
+  d_head: 32
+  d_mlp: 512
+  n_ctx: 3
+  act_fn: relu
+  normalization_type: null
+
+data:
+  frac_train: 0.3
+
+optim:
+  lr: 0.001
+  weight_decay: 1.0
+
+train:
+  seed: 42
+  batch_size: 64
+  epochs: 10000
+  eval_every: 100
+  checkpoint_milestones: [0.05, 0.10, 0.20, 0.25, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95, 0.99]
+
+logging:
+  wandb_project: grokking-demo
+  run_name: early-window
+
+physics:
+  temperatures: [0.0]
+  seeds: [52, 53, 54]
+  max_epochs: 30000
+  eval_every: 25
+  grok_thresholds: [0.95, 0.99]
+  noise_seed_offset: 10000

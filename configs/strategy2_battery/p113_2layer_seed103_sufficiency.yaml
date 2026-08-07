@@ -1,0 +1,60 @@
+model:
+  p: 113
+  d_model: 128
+  n_layers: 2
+  n_heads: 4
+  d_head: 32
+  d_mlp: 512
+  n_ctx: 3
+  act_fn: relu
+  normalization_type: null
+data:
+  frac_train: 0.3
+optim:
+  lr: 0.001
+  weight_decay: 1.0
+train:
+  seed: 100
+  batch_size: 64
+  epochs: 10000
+  eval_every: 100
+  checkpoint_milestones:
+  - 0.8
+  - 0.9
+  - 0.95
+  - 0.99
+logging:
+  wandb_project: grokking-demo
+  run_name: strategy2-p113-battery
+fourier_ablation:
+  sites:
+  - pre_unembed
+  sweep_mode: multi_frequency
+  custom_frequency_sets: []
+  eval_batch_size: 2048
+  causal_train_floor: 0.9
+  causal_test_chance_multiplier: 2.0
+  seed: 123
+  random_control_repeats: 3
+  checkpoint_paths:
+  - results/strategy2/p113_2layer/seed_103/artifacts/strategy2_p113_2layer_seed103_epoch_002000.pt
+  - results/strategy2/p113_2layer/seed_103/artifacts/strategy2_p113_2layer_seed103_testacc_05.pt
+  - results/strategy2/p113_2layer/seed_103/artifacts/strategy2_p113_2layer_seed103_testacc_50.pt
+  - results/strategy2/p113_2layer/seed_103/artifacts/strategy2_p113_2layer_seed103_testacc_80.pt
+  - results/strategy2/p113_2layer/seed_103/artifacts/strategy2_p113_2layer_seed103_testacc_95.pt
+  - results/strategy2/p113_2layer/seed_103/artifacts/strategy2_p113_2layer_seed103_testacc_99.pt
+  intervention_mode: keep_only_selected
+  top_k_values:
+  - 1
+  - 2
+  - 3
+  - 5
+  - 10
+  - 56
+  bottom_k_values:
+  - 5
+  random_k_values:
+  - 3
+  - 5
+  - 10
+  output_stem: strategy2_p113_2layer_seed103_sufficiency
