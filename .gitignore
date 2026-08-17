@@ -2,6 +2,10 @@
 .DS_Store
 .vscode/
 
+# Tool config
+.claude/
+.codex/
+
 # Python caches
 __pycache__/
 *.py[cod]
